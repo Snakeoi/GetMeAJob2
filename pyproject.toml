@@ -1,0 +1,28 @@
+[project]
+name = "getmeajob"
+version = "0.1.0"
+description = "Local desktop assistant for reviewing and applying to jobs"
+requires-python = ">=3.12"
+dependencies = [
+  "Flask>=3.1,<4",
+  "beautifulsoup4>=4.13,<5",
+  "httpx>=0.28,<1",
+  "pywebview>=6.0,<7",
+  "mcp>=1.0,<2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[project.scripts]
+getmeajob = "getmeajob.__main__:main"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["getmeajob*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

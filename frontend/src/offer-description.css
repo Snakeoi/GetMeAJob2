@@ -1,0 +1,19 @@
+.offer-description {
+  border-top: 1px solid #e8edf3;
+  padding: 16px 25px;
+}
+
+.offer-description summary {
+  color: #31567f;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.offer-description p {
+  color: #5d7189;
+  font-size: 11px;
+  line-height: 1.65;
+  margin: 15px 0 3px;
+  white-space: pre-wrap;
+}

@@ -1,0 +1,7 @@
+pyproject.toml
+getmeajob.egg-info/PKG-INFO
+getmeajob.egg-info/SOURCES.txt
+getmeajob.egg-info/dependency_links.txt
+getmeajob.egg-info/entry_points.txt
+getmeajob.egg-info/requires.txt
+getmeajob.egg-info/top_level.txt
