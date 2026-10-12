@@ -327,7 +327,7 @@ class Store:
     def approved_offers(self) -> list[dict[str, Any]]:
         return [offer for offer in self.list_offers() if offer["decision"] == "approved"]
 
-    def mark_submitted(self, offer_id: str, confirmation: str, notes: str = "") -> None:
+    def mark_submitted(self, offer_id: str, confirmation: str = "", notes: str = "") -> None:
         with self.connection() as conn:
             row = conn.execute("SELECT status FROM applications WHERE offer_id = ?", (offer_id,)).fetchone()
             if not row or row["status"] != "approved":

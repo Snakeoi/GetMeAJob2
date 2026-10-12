@@ -50,7 +50,7 @@ def test_offer_versions_and_stale_evaluation(tmp_path):
     assert count == 2
 
 
-def test_approval_requires_evaluation_and_submission_confirmation(tmp_path):
+def test_approval_requires_evaluation_but_not_submission_note(tmp_path):
     store = Store(tmp_path / "db.sqlite3")
     store.upsert_offer(OFFER)
     offer_id = store.list_offers()[0]["id"]
@@ -62,9 +62,105 @@ def test_approval_requires_evaluation_and_submission_confirmation(tmp_path):
     assert client.post(f"/api/offers/{offer_id}/decision", json={"decision": "approved"}, headers=headers).status_code == 400
     store.save_evaluation(offer_id, evaluation(), "test")
     assert client.post(f"/api/offers/{offer_id}/decision", json={"decision": "approved"}, headers=headers).status_code == 200
-    assert client.post(f"/api/applications/{offer_id}/submitted", json={"confirmation": ""}, headers=headers).status_code == 400
-    assert client.post(f"/api/applications/{offer_id}/submitted", json={"confirmation": "Dziękujemy za aplikację"}, headers=headers).status_code == 200
+    assert client.post(f"/api/applications/{offer_id}/submitted", json={}, headers=headers).status_code == 200
+    assert store.applications()[0]["confirmation"] == ""
     assert client.post(f"/api/applications/{offer_id}/submitted", json={"confirmation": "drugi raz"}, headers=headers).status_code == 400
+
+
+def test_submission_note_is_saved_when_provided(tmp_path):
+    store = Store(tmp_path / "db.sqlite3")
+    store.upsert_offer(OFFER)
+    offer_id = store.list_offers()[0]["id"]
+    store.save_evaluation(offer_id, evaluation(), "test")
+    app = create_app(storage_path=store.path)
+    client = app.test_client()
+    headers = {"X-Local-Token": client.get("/api/bootstrap").json["token"]}
+    assert client.post(f"/api/offers/{offer_id}/decision", json={"decision": "approved"}, headers=headers).status_code == 200
+    assert client.post(f"/api/applications/{offer_id}/submitted", json={"confirmation": "Dziękujemy za aplikację"}, headers=headers).status_code == 200
+    assert store.applications()[0]["confirmation"] == "Dziękujemy za aplikację"
+
+
+def test_sync_uses_only_selected_sources(tmp_path):
+    class FakeSource:
+        def __init__(self, source_id, display_name):
+            self.source_id = source_id
+            self.display_name = display_name
+            self.calls = 0
+
+        def offers(self, progress=None):
+            self.calls += 1
+            return iter(())
+
+    store = Store(tmp_path / "db.sqlite3")
+    sources = [FakeSource("rocketjobs", "RocketJobs"), FakeSource("justjoin", "JustJoinIT"), FakeSource("pracuj", "Pracuj.pl")]
+    service = JobService(store, source=sources[0])
+    service.sources = sources
+    client = create_app(service=service).test_client()
+    bootstrap = client.get("/api/bootstrap").json
+    headers = {"X-Local-Token": bootstrap["token"]}
+    assert bootstrap["sources"] == [
+        {"id": "rocketjobs", "label": "RocketJobs"},
+        {"id": "justjoin", "label": "JustJoinIT"},
+        {"id": "pracuj", "label": "Pracuj.pl"},
+    ]
+    assert client.post("/api/sync", json={"sources": []}, headers=headers).status_code == 400
+    assert client.post("/api/sync", json={"sources": ["unknown"]}, headers=headers).status_code == 400
+    assert client.post("/api/sync", json={"sources": "rocketjobs"}, headers=headers).status_code == 400
+
+    try:
+        assert client.post("/api/sync", json={"sources": ["justjoin"]}, headers=headers).status_code == 202
+        for _ in range(100):
+            if service.operations.current()["status"] != "running":
+                break
+            time.sleep(0.01)
+        assert service.operations.current()["status"] == "done"
+        assert [source.calls for source in sources] == [0, 1, 0]
+    finally:
+        service.operations.executor.shutdown(wait=True)
+
+
+def test_sync_persists_counts_and_rejection_reasons_by_source(tmp_path):
+    class FakeSource:
+        source_id = "pracuj"
+        display_name = "Pracuj.pl"
+
+        def offers(self, progress=None):
+            yield {**OFFER, "source": "pracuj", "url": "https://www.pracuj.pl/praca/python,oferta,1"}
+            yield {**OFFER, "source": "pracuj", "url": "https://www.pracuj.pl/praca/python,oferta,2", "remote_mode": "hybrid"}
+
+    store = Store(tmp_path / "db.sqlite3")
+    service = JobService(store, source=FakeSource())
+    result = service.sync(lambda *_args: None)
+
+    assert (result["seen"], result["matched"], result["skipped"], result["new"]) == (2, 1, 1, 1)
+    assert result["sources"][0]["skip_reasons"] == {"Oferta nie potwierdza pracy w pełni zdalnej": 1}
+    assert store.get_setting("last_sync_report") == result
+    assert create_app(service=service).test_client().get("/api/bootstrap").json["last_sync_report"] == result
+
+
+def test_failed_sync_persists_partial_report(tmp_path):
+    class FailingSource:
+        source_id = "pracuj"
+        display_name = "Pracuj.pl"
+
+        def offers(self, progress=None):
+            yield {**OFFER, "source": "pracuj", "url": "https://www.pracuj.pl/praca/python,oferta,3"}
+            raise RuntimeError("Źródło nie odpowiada")
+
+    store = Store(tmp_path / "db.sqlite3")
+    service = JobService(store, source=FailingSource())
+
+    try:
+        service.sync(lambda *_args: None)
+    except RuntimeError as exc:
+        assert str(exc) == "Źródło nie odpowiada"
+    else:
+        raise AssertionError("Synchronizacja powinna zgłosić błąd")
+
+    report = store.get_setting("last_sync_report")
+    assert report["status"] == "error"
+    assert report["new"] == 1
+    assert report["sources"][0]["new"] == 1
 
 
 def test_database_reset_requires_phrase_and_creates_recoverable_backup(tmp_path):

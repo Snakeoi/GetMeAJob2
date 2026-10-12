@@ -13,7 +13,7 @@ Aplikacja działająca wyłącznie na komputerze właściciela zbiera wybrane of
 3. Dane aplikacji znajdują się w lokalnej bazie SQLite. Nie jest wymagany PostgreSQL, Redis ani osobny serwer kolejek.
 4. Ocena ofert korzysta z wymiennego adaptera agenta. Domyślnie Codex. Alternatywą jest LM Studio Bionic z wybranym modelem lokalnym lub chmurowym.
 5. Składanie aplikacji wykonuje Codex za pomocą przeglądarki. Sam silnik aplikacji przygotowuje kolejkę, fakty z CV, wersję CV i historię zgłoszenia.
-6. Konektory źródeł ofert są wymienne. Pierwszym źródłem jest RocketJobs; drugi konektor korzysta z publicznej mapy JustJoinIT.
+6. Konektory źródeł ofert są wymienne. Źródłami są RocketJobs, JustJoinIT oraz Pracuj.pl. Konektor Pracuj.pl czyta publiczne dane ofert i, gdy ochrona Cloudflare blokuje zwykły odczyt, korzysta z tekstowego podglądu wyłącznie publicznego URL-a; nie przekazuje profilu ani danych kandydata.
 7. Właściciel przegląda i zatwierdza wybrane oferty przed przekazaniem ich Codex do wysłania aplikacji.
    Możliwe są też ręcznie uruchamiane decyzje zbiorcze dla ofert z aktualną oceną i bez wcześniejszej decyzji: zatwierdzenie od 70/100 włącznie oraz odrzucenie poniżej 50/100. Oba progi są konfigurowalne; ich zmiana nie modyfikuje wcześniejszych decyzji.
 8. Głównym interfejsem jest aplikacja okienkowa na macOS, uruchamiana jak zwykły program, bez potrzeby otwierania adresu w przeglądarce.
@@ -25,6 +25,10 @@ Powłoka pywebview wyświetla interfejs Vue w natywnym oknie macOS i bezpośredn
 Główne widoki: `Oferty` (bez oceny), `Do sprawdzenia` (ocenione bez decyzji), `Zatwierdzone do wysłania`, `Odrzucone`, `Historia aplikacji` i `Ustawienia wyszukiwania`. Oryginalne ogłoszenie oraz formularz rekrutacyjny otwierają się w przeglądarce używanej przez Codex. Okno aplikacji pozostaje miejscem przeglądu ocen i zatwierdzania ofert.
 
 Przyciski zatwierdzenia i odrzucenia są na górze szczegółów oferty. Ocena AI działa w tle: podczas niej można przeglądać aplikację, a ukończone wyniki pojawiają się w interfejsie na bieżąco. Decyzja zbiorcza nie wysyła CV i nie uruchamia automatycznie Codex.
+
+Przycisk `Pobierz oferty` otwiera okno z listą aktualnie zarejestrowanych konektorów. Właściciel wybiera co najmniej jeden serwis; synchronizacja uruchamia tylko wybrane konektory. Lista w oknie pochodzi z serwera, aby nowa integracja mogła do niej dołączyć bez zmiany formularza.
+
+Po synchronizacji aplikacja zapisuje ostatni raport w SQLite i pokazuje go w przeglądzie również po ponownym uruchomieniu. Raport zawiera liczby pobranych, pasujących, nowych i odrzuconych ofert dla każdego serwisu oraz powody odrzucenia. Dla Pracuj.pl zawiera także liczbę sprawdzonych stron, pozycji na listach, unikatowych kandydatów i błędów pobrania szczegółów. Błędy pojedynczych ofert nie zatrzymują całego pobierania; błąd źródła przerywa operację i zapisuje raport częściowy.
 
 Widok `Zatwierdzone` pokazuje wyłącznie aplikacje oczekujące na wysłanie; wysłane pozostają w historii. Nieaktualna ocena jest jednoznacznie oznaczona na liście i w szczegółach, a oferta z taką oceną nie kwalifikuje się do zatwierdzenia zbiorczego. Wyszukiwanie ogranicza listę i szczegóły do tych samych wyników. Potwierdzenia decyzji zbiorczych oraz oznaczenie aplikacji jako wysłanej odbywają się w oknach aplikacji, bez blokujących okien systemowych.
 
@@ -46,7 +50,7 @@ Jeżeli oferta podaje górną granicę wynagrodzenia poniżej progu dla danego t
 ## Zakres pierwszego działającego przyrostu
 
 1. Użytkownik zapisuje profil poszukiwania: role, lokalizacje, tryb pracy, rodzaj umowy, minimum finansowe, technologie i wykluczenia.
-2. Konektory RocketJobs i JustJoinIT odkrywają oferty z publicznych map, pobierają szczegóły ze stron ofert i zapisują je bez duplikatów. JustJoinIT sprawdza maksymalnie 300 najświeższych kandydatów z pasującą nazwą roli na synchronizację.
+2. Konektory RocketJobs, JustJoinIT i Pracuj.pl odkrywają oferty z publicznych map lub wyników wyszukiwania, pobierają szczegóły ze stron ofert i zapisują je bez duplikatów. JustJoinIT sprawdza maksymalnie 300 najświeższych kandydatów z pasującą nazwą roli na synchronizację. Pracuj.pl sprawdza do 6 stron dla każdej z fraz `python developer`, `backend python`, `full stack vue`; ma limit 100 kandydatów na frazę i 300 łącznie oraz opóźnienie między żądaniami. Deduplikacja między frazami nie pozbawia kolejnej frazy własnego limitu. Limity chronią przed nieograniczonym pobieraniem i są jawne w raporcie.
 3. Aplikacja oznacza nowe i zmienione oferty. Wykrywanie wygasłych ofert pozostaje do wykonania.
 4. Agent ocenia każdą ofertę według profilu kandydata i profilu poszukiwania. Użytkownik może uruchomić ocenę pojedynczej oferty albo jedną operację dla wszystkich ofert bez aktualnej oceny. Wynik zawiera rekomendację, uzasadnienie, braki, niepewności oraz odwołania do konkretnych fragmentów oferty i CV.
 5. Użytkownik widzi kolejkę ofert i może oznaczyć ofertę jako interesującą, odrzuconą lub wymagającą ponownej oceny.
@@ -87,7 +91,7 @@ Profil startowy wynikający z dostarczonego CV: Python i Flask, Vue, REST, SQL i
 2. Aplikacja przygotowuje pakiet: adres oferty, profil kandydata, zatwierdzony plik CV, dane do formularza i historię wcześniejszych aplikacji.
 3. Codex otwiera formularz w przeglądarce, wypełnia pola i identyfikuje dodatkowe pytania oraz zgody.
 4. Gdy wymagana jest nieznana deklaracja lub formularz budzi wątpliwości, Codex prosi właściciela o decyzję.
-5. Po wysłaniu aplikacja zapisuje czas, źródło, identyfikator oferty i dowód potwierdzenia. Ponowne wysłanie tej samej oferty wymaga osobnej decyzji.
+5. Po wysłaniu aplikacja zapisuje czas, źródło i identyfikator oferty. Notatka z komunikatem lub numerem zgłoszenia jest opcjonalna. Ponowne wysłanie tej samej oferty wymaga osobnej decyzji.
 
 Projektowa konfiguracja `.codex/config.toml` rejestruje serwer MCP i została zweryfikowana przez `codex mcp list` oraz połączenie testowe. Samo uruchomienie sesji przeglądarkowej Codex z okna aplikacji nie jest jeszcze zaimplementowane.
 
@@ -104,6 +108,7 @@ Bez logowania do aplikacji. Minimalne środki: nasłuchiwanie na loopback, CV i 
 
 ## Kryteria akceptacji pierwszego przyrostu
 
+- Przed synchronizacją można wybrać dowolny niepusty podzbiór dostępnych serwisów; niewybrane konektory nie wykonują żądań.
 - Ponowne pobranie tej samej oferty nie tworzy duplikatu.
 - Zmiana treści oferty jest wykrywana i może uruchomić ponowną ocenę.
 - Oferta odrzucona przez twardy warunek ma widoczny powód.

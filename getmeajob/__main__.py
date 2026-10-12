@@ -14,7 +14,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Lokalny asystent poszukiwania pracy")
     parser.add_argument("--web", action="store_true", help="Uruchom panel na 127.0.0.1:5757 do pracy developerskiej")
     parser.add_argument("--mcp", action="store_true", help="Uruchom serwer MCP przez stdio dla Codex")
-    parser.add_argument("--sync", action="store_true", help="Pobierz pasujące oferty RocketJobs i JustJoinIT i zakończ")
+    parser.add_argument("--sync", action="store_true", help="Pobierz pasujące oferty ze wszystkich źródeł i zakończ")
     args = parser.parse_args()
     if args.mcp:
         create_mcp_server().run(transport="stdio")

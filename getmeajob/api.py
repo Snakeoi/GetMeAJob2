@@ -47,6 +47,8 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
             "candidate_profile": store.get_setting("candidate_profile"),
             "resume_name": Path(resume).name if resume else None,
             "operation": service.operations.current(),
+            "last_sync_report": store.get_setting("last_sync_report"),
+            "sources": service.available_sources(),
         })
 
     @app.get("/api/offers")
@@ -59,7 +61,10 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
 
     @app.post("/api/sync")
     def sync() -> Any:
-        service.operations.start("sync", service.sync)
+        payload = request.get_json(silent=True) or {}
+        source_ids = payload.get("sources")
+        service.selected_sources(source_ids)
+        service.operations.start("sync", lambda report: service.sync(report, source_ids))
         return jsonify({"started": True}), 202
 
     @app.post("/api/evaluate")
@@ -106,8 +111,6 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
     def mark_submitted(offer_id: str) -> Any:
         payload = request.get_json(silent=True) or {}
         confirmation = str(payload.get("confirmation") or "").strip()
-        if not confirmation:
-            raise ValueError("Podaj potwierdzenie wysłania aplikacji")
         store.mark_submitted(offer_id, confirmation, str(payload.get("notes") or ""))
         return jsonify({"ok": True})
 

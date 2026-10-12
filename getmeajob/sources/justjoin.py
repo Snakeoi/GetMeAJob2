@@ -105,6 +105,9 @@ def parse_job_page(url: str, page: str, source_updated_at: str | None = None) ->
 
 
 class JustJoinSource:
+    source_id = "justjoin"
+    display_name = "JustJoinIT"
+
     def __init__(self, client: httpx.Client | None = None, delay_seconds: float = 0.5, max_candidates: int = 300):
         self.client = client or httpx.Client(
             follow_redirects=True,

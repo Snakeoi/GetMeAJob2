@@ -24,10 +24,10 @@ Tryb developerski bez natywnego okna: `./.venv/bin/python -m getmeajob --web`, a
 ## Użycie
 
 1. W `Ustawieniach` sprawdź fakty z CV, kryteria i plik CV. Dołączone CV jest już skopiowane do lokalnego katalogu aplikacji na tym komputerze.
-2. `Pobierz oferty` przeszukuje publiczne mapy RocketJobs i JustJoinIT. Możesz też dodać bezpośredni link z jednego z tych serwisów.
+2. `Pobierz oferty` otwiera wybór serwisów: RocketJobs, JustJoinIT i Pracuj.pl. Zaznacz co najmniej jeden; synchronizacja przeszuka tylko wybrane. Możesz też dodać bezpośredni link z jednego z tych serwisów. Pracuj.pl czasem chroni zwykłe żądania przez Cloudflare; wtedy aplikacja korzysta z tekstowego podglądu publicznej strony, przekazując wyłącznie URL oferty — bez CV i danych kandydata.
 3. Widok `Oferty` zawiera tylko pozycje bez oceny. `Oceń nieocenione oferty` uruchamia jedną operację dla tych pozycji. Dwie oferty są analizowane równolegle, a pasek u góry pokazuje liczbę ukończonych ocen i czas pracy; błąd jednej pozycji nie zatrzymuje kolejki. Oceny nieaktualne można ponowić zbiorczo w `Do sprawdzenia`. Ocena zawiera uzasadnienie, powiązania wymagań z CV, luki oraz niewiadome. Oferty bez potwierdzonego progu pensji nie dostają automatycznie rekomendacji „aplikuj”.
 4. W `Do sprawdzenia` otwórz oryginalną ofertę, przejrzyj ocenę i dopiero wtedy kliknij `Zatwierdź`. Odrzucone oferty pozostają dostępne w osobnym widoku.
-5. W nowym zadaniu Codex otwartym dla tego projektu możesz poprosić: „Zaaplikuj przez przeglądarkę na zatwierdzone oferty z GetMeAJob. Użyj lokalnego MCP. Jeśli formularz wymaga informacji nieobecnych w CV, zatrzymaj się i zapytaj mnie. Zapisz potwierdzenie dopiero po rzeczywistym wysłaniu.”
+5. W nowym zadaniu Codex otwartym dla tego projektu możesz poprosić: „Zaaplikuj przez przeglądarkę na zatwierdzone oferty z GetMeAJob. Użyj lokalnego MCP. Jeśli formularz wymaga informacji nieobecnych w CV, zatrzymaj się i zapytaj mnie. Oznacz jako wysłane dopiero po rzeczywistym wysłaniu.” Notatka z potwierdzeniem jest opcjonalna.
 
 Serwer MCP jest skonfigurowany w `.codex/config.toml` tego projektu. Wymaga zaufania do projektu i może wymagać otwarcia nowego zadania Codex. Polecenie `codex mcp list` powinno pokazać `getmeajob` jako włączony.
 
@@ -38,4 +38,4 @@ Serwer MCP jest skonfigurowany w `.codex/config.toml` tego projektu. Wymaga zauf
 cd frontend && npm run build
 ```
 
-Model oceny można zmienić przez `GETMEAJOB_CODEX_MODEL`; domyślnie używany jest `gpt-5.5`, dostępny na obecnym lokalnym koncie Codex. Integracja z LM Studio/Bionic, automatyczne uruchamianie sesji aplikacyjnej z okna, harmonogram synchronizacji, wykrywanie wygasłych ofert i pakiet `.app` są kolejnymi przyrostami. JustJoinIT ogranicza jedną synchronizację do 300 najświeższych kandydatów według nazw ról, aby nie obciążać serwisu.
+Model oceny można zmienić przez `GETMEAJOB_CODEX_MODEL`; domyślnie używany jest `gpt-5.5`, dostępny na obecnym lokalnym koncie Codex. Integracja z LM Studio/Bionic, automatyczne uruchamianie sesji aplikacyjnej z okna, harmonogram synchronizacji, wykrywanie wygasłych ofert i pakiet `.app` są kolejnymi przyrostami. JustJoinIT ogranicza jedną synchronizację do 300 najświeższych kandydatów według nazw ról, a Pracuj.pl domyślnie do 80 kandydatów z dwóch stron wyników, aby nie obciążać serwisów.

@@ -48,8 +48,8 @@ def create_mcp_server(storage_path: Path | None = None) -> FastMCP:
         return json.dumps(result, ensure_ascii=False)
 
     @server.tool()
-    def mark_application_submitted(offer_id: str, confirmation: str, notes: str = "") -> str:
-        """Record a real submission only after the recruitment site confirms it; the offer must already be owner-approved."""
+    def mark_application_submitted(offer_id: str, confirmation: str = "", notes: str = "") -> str:
+        """Record a real submission only after the recruitment site confirms it; the offer must already be owner-approved. Confirmation text is optional."""
         store.mark_submitted(offer_id, confirmation, notes)
         return json.dumps({"ok": True, "offer_id": offer_id}, ensure_ascii=False)
 

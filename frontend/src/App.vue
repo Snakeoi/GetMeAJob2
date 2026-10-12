@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   ArrowDownToLine, ArrowRight, BadgeCheck, BriefcaseBusiness, Check, ChevronRight,
-  CircleAlert, Clock3, ExternalLink, FolderCheck, LayoutDashboard,
+  CircleAlert, ExternalLink, FolderCheck, LayoutDashboard,
   Link2, LoaderCircle, MapPin, RotateCw, Search, Settings2,
   Sparkles, ThumbsDown, Wallet, X,
 } from 'lucide-vue-next'
@@ -17,6 +17,11 @@ const decisionProfile = ref(null)
 const candidateProfile = ref(null)
 const resumeName = ref(null)
 const operation = ref({ status: 'idle' })
+const lastSyncReport = ref(null)
+const availableSources = ref([])
+const selectedSyncSourceIds = ref([])
+const showSync = ref(false)
+const syncStarting = ref(false)
 const search = ref('')
 const importUrl = ref('')
 const showImport = ref(false)
@@ -44,7 +49,7 @@ const nav = [
   { id: 'review', label: 'Do sprawdzenia', icon: Sparkles },
   { id: 'approved', label: 'Zatwierdzone', icon: FolderCheck },
   { id: 'rejected', label: 'Odrzucone', icon: ThumbsDown },
-  { id: 'history', label: 'Historia aplikacji', icon: Clock3 },
+  { id: 'submitted', label: 'Wysłane', icon: BadgeCheck },
   { id: 'settings', label: 'Ustawienia', icon: Settings2 },
 ]
 
@@ -52,6 +57,7 @@ const selected = computed(() => visibleOffers.value.find((item) => item.id === s
 const selectedApplication = computed(() => applications.value.find((item) => item.offer_id === selectedId.value) || null)
 const pendingApprovedIds = computed(() => new Set(applications.value.filter((item) => item.status === 'approved').map((item) => item.offer_id)))
 const submittedOfferIds = computed(() => new Set(applications.value.filter((item) => item.status === 'submitted').map((item) => item.offer_id)))
+const submittedApplications = computed(() => applications.value.filter((item) => item.status === 'submitted'))
 const unevaluatedOfferIds = computed(() => offers.value
   .filter((item) => item.decision === 'none' && !item.evaluation)
   .map((item) => item.id))
@@ -123,6 +129,9 @@ async function boot() {
     candidateProfile.value = data.candidate_profile
     resumeName.value = data.resume_name
     operation.value = data.operation
+    lastSyncReport.value = data.last_sync_report
+    availableSources.value = data.sources || []
+    selectedSyncSourceIds.value = availableSources.value.map((source) => source.id)
     excludedText.value = (data.search_profile.excluded_terms || []).join(', ')
     candidateFactsText.value = data.candidate_profile.facts.map((fact) => fact.text).join('\n')
     await refresh()
@@ -148,23 +157,34 @@ async function pollOperation() {
     operation.value = next
     if (progressChanged || next.status !== 'running') await refresh()
     if (next.status === 'done') {
-      notice.value = next.kind === 'sync' ? 'Synchronizacja zakończona.' : 'Ocena ofert zakończona. Wyniki są w „Do sprawdzenia”.'
+      if (next.kind === 'sync') lastSyncReport.value = next.result
+      notice.value = next.kind === 'sync' ? `Pobieranie zakończone: ${next.result?.new ?? 0} nowych ofert.` : 'Ocena ofert zakończona. Wyniki są w „Do sprawdzenia”.'
       if (next.result?.errors?.length) error.value = `${next.result.errors.length} ocen nie powiodło się. ${next.result.errors[0].error}`
     } else if (next.status === 'error') {
       error.value = next.message
+      if (next.kind === 'sync') lastSyncReport.value = (await api('/api/bootstrap')).last_sync_report
     }
   } catch (exc) {
     error.value = exc.message
   } finally { polling = false }
 }
 
+function openSyncDialog() {
+  error.value = ''
+  showSync.value = true
+}
+
 async function startSync() {
+  if (!selectedSyncSourceIds.value.length || syncStarting.value) return
   try {
+    syncStarting.value = true
     error.value = ''
-    await api('/api/sync', { method: 'POST' })
+    await api('/api/sync', { method: 'POST', body: JSON.stringify({ sources: selectedSyncSourceIds.value }) })
+    showSync.value = false
     const now = new Date().toISOString()
     operation.value = { kind: 'sync', status: 'running', message: 'Szukam ofert…', current: 0, total: 0, started_at: now, updated_at: now }
   } catch (exc) { error.value = exc.message }
+  finally { syncStarting.value = false }
 }
 
 async function startEvaluation(ids) {
@@ -292,17 +312,13 @@ function markSubmitted(application) {
 
 async function confirmSubmission() {
   const confirmation = submissionConfirmation.value.trim()
-  if (!confirmation) {
-    error.value = 'Podaj potwierdzenie wysłania.'
-    return
-  }
   try {
     submissionSaving.value = true
     error.value = ''
     await api(`/api/applications/${pendingSubmission.value.offer_id}/submitted`, { method: 'POST', body: JSON.stringify({ confirmation }) })
     await refresh()
     pendingSubmission.value = null
-    notice.value = 'Wysłanie zapisane w historii.'
+    notice.value = 'Aplikacja została przeniesiona do „Wysłanych”.'
   } catch (exc) { error.value = exc.message }
   finally { submissionSaving.value = false }
 }
@@ -332,6 +348,7 @@ async function bootAfterReset() {
   decisionProfile.value = data.decision_profile
   candidateProfile.value = data.candidate_profile
   resumeName.value = data.resume_name
+  lastSyncReport.value = data.last_sync_report
   excludedText.value = (data.search_profile.excluded_terms || []).join(', ')
   candidateFactsText.value = data.candidate_profile.facts.map((fact) => fact.text).join('\n')
   await refresh()
@@ -345,7 +362,7 @@ function pickSection(id) {
 }
 
 function openOffer(offer) {
-  section.value = submittedOfferIds.value.has(offer.id) ? 'history'
+  section.value = submittedOfferIds.value.has(offer.id) ? 'submitted'
     : offer.decision === 'rejected' ? 'rejected'
       : pendingApprovedIds.value.has(offer.id) ? 'approved'
         : offer.evaluation ? 'review' : 'offers'
@@ -368,6 +385,14 @@ function salaryText(salary) {
   const amount = salary.minimum === salary.maximum ? formatMoney(salary.minimum) : `${formatMoney(salary.minimum || 0)} – ${formatMoney(salary.maximum || 0)}`
   const unit = salary.unit === 'month' ? 'mies.' : salary.unit === 'hour' ? 'godz.' : salary.unit || ''
   return `${amount} ${salary.currency || ''} / ${unit}`
+}
+
+function sourceLabel(source) {
+  return {
+    rocketjobs: 'RocketJobs',
+    justjoin: 'JustJoinIT',
+    pracuj: 'Pracuj.pl',
+  }[source] || source || 'Nieznane źródło'
 }
 
 function recommendationLabel(offer) {
@@ -424,18 +449,20 @@ onUnmounted(() => {
         <button v-for="item in nav" :key="item.id" :class="['nav-item', { active: section === item.id }]" @click="pickSection(item.id)">
           <component :is="item.icon" :size="18" />
           <span>{{ item.label }}</span>
+          <b v-if="item.id === 'offers' && counters.unrated">{{ counters.unrated }}</b>
           <b v-if="item.id === 'review' && counters.review">{{ counters.review }}</b>
           <b v-if="item.id === 'approved' && counters.approved">{{ counters.approved }}</b>
           <b v-if="item.id === 'rejected' && counters.rejected">{{ counters.rejected }}</b>
+          <b v-if="item.id === 'submitted' && counters.submitted">{{ counters.submitted }}</b>
         </button>
       </nav>
     </aside>
 
     <main class="main">
-      <header class="topbar"><div class="top-actions"><span v-if="operation.status === 'running'" class="operation-inline"><LoaderCircle :size="15" class="spin" /><span>{{ operation.message }}</span><small v-if="operationElapsed">{{ operationElapsed }}</small></span><button class="outline-button" @click="error = ''; showImport = true"><Link2 :size="16" /> Dodaj link</button><button class="primary-button" :disabled="operation.status === 'running'" @click="startSync"><RotateCw :size="16" :class="{ spin: operation.status === 'running' && operation.kind === 'sync' }" /> Pobierz oferty</button></div></header>
+      <header class="topbar"><div class="top-actions"><span v-if="operation.status === 'running'" class="operation-inline"><LoaderCircle :size="15" class="spin" /><span>{{ operation.message }}</span><small v-if="operationElapsed">{{ operationElapsed }}</small></span><button class="outline-button" @click="error = ''; showImport = true"><Link2 :size="16" /> Dodaj link</button><button class="primary-button" :disabled="operation.status === 'running'" @click="openSyncDialog"><RotateCw :size="16" :class="{ spin: operation.status === 'running' && operation.kind === 'sync' }" /> Pobierz oferty</button></div></header>
 
       <div v-if="notice" class="toast success"><Check :size="17" /> {{ notice }} <button @click="notice = ''"><X :size="15" /></button></div>
-      <div v-if="error && !showImport && !pendingBulkDecision && !pendingSubmission" class="toast error"><CircleAlert :size="17" /> {{ error }} <button @click="error = ''"><X :size="15" /></button></div>
+      <div v-if="error && !showSync && !showImport && !pendingBulkDecision && !pendingSubmission" class="toast error"><CircleAlert :size="17" /> {{ error }} <button @click="error = ''"><X :size="15" /></button></div>
 
       <template v-if="section === 'overview'">
         <div class="page-intro minimal-intro"><h1>Oferty</h1><div class="overview-heading-actions"><span class="count-line">{{ counters.all }} zapisanych</span><button v-if="counters.stale" class="outline-button" @click="startStaleEvaluation" :disabled="operation.status === 'running'"><RotateCw :size="16" /> Oceń ponownie nieaktualne <b>{{ counters.stale }}</b></button><button v-if="counters.unrated" class="outline-button" @click="startUnevaluatedEvaluation" :disabled="operation.status === 'running'"><Sparkles :size="16" /> Oceń nieocenione oferty <b>{{ counters.unrated }}</b></button></div></div>
@@ -445,9 +472,24 @@ onUnmounted(() => {
           <div class="stat-card"><span>Do sprawdzenia</span><strong>{{ counters.review }}</strong></div>
           <div class="stat-card"><span>Zatwierdzone</span><strong>{{ counters.approved }}</strong></div>
         </div>
+        <details v-if="lastSyncReport" class="sync-report">
+          <summary>Ostatnie pobieranie · {{ new Date(lastSyncReport.finished_at).toLocaleString('pl-PL') }} · {{ lastSyncReport.status === 'error' ? 'przerwane' : `${lastSyncReport.new} nowych, ${lastSyncReport.skipped} odrzuconych przez filtr` }}</summary>
+          <p v-if="lastSyncReport.status === 'error'" class="sync-report-error">Przerwano: {{ lastSyncReport.error }}</p>
+          <div v-for="source in lastSyncReport.sources" :key="source.id" class="sync-report-source">
+            <strong>{{ source.label }}</strong>
+            <span>{{ source.seen }} pobranych szczegółów · {{ source.matched }} pasujących · {{ source.new }} nowych · {{ source.skipped }} odrzuconych</span>
+            <template v-if="source.discovery?.search_terms">
+              <small>{{ source.discovery.pages_checked }} stron wyników · {{ source.discovery.listing_rows }} pozycji na listach · {{ source.discovery.title_filtered }} odrzuconych po tytule · {{ source.discovery.duplicates }} duplikatów · {{ source.discovery.candidates }} kandydatów · {{ source.discovery.details_failed ?? 0 }} błędów szczegółów</small>
+              <small>Frazy: <span v-for="(count, term) in source.discovery.candidates_by_term" :key="term">{{ term }} ({{ count }}) · </span></small>
+              <small v-if="source.discovery.search_limit_reached || source.discovery.term_limits_reached?.length || source.discovery.page_limits_reached?.length">Limity: <span v-if="source.discovery.search_limit_reached">łącznie {{ source.discovery.max_candidates }} kandydatów · </span><span v-if="source.discovery.term_limits_reached?.length">{{ source.discovery.max_candidates_per_term }} na frazę: {{ source.discovery.term_limits_reached.join(', ') }} · </span><span v-if="source.discovery.page_limits_reached?.length">{{ source.discovery.max_pages_per_term }} stron: {{ source.discovery.page_limits_reached.join(', ') }}</span></small>
+              <small v-if="Object.keys(source.discovery.detail_errors || {}).length">Błędy szczegółów: <span v-for="(count, reason) in source.discovery.detail_errors" :key="reason">{{ reason }} ({{ count }}) · </span></small>
+            </template>
+            <ul v-if="Object.keys(source.skip_reasons || {}).length"><li v-for="(count, reason) in source.skip_reasons" :key="reason">{{ reason }}: {{ count }}</li></ul>
+          </div>
+        </details>
         <div class="section-heading"><h2>Ostatnie oferty</h2><button class="text-button" @click="pickSection('offers')">Nieocenione <ArrowRight :size="16" /></button></div>
-        <div v-if="!offers.length" class="empty-card"><h3>Brak ofert</h3><button class="primary-button" @click="startSync"><ArrowDownToLine :size="16" /> Pobierz oferty</button></div>
-        <div v-else class="overview-list"><button v-for="offer in offers.slice(0, 5)" :key="offer.id" class="overview-row" @click="openOffer(offer)"><span class="company-avatar">{{ offer.company?.slice(0, 1) || '?' }}</span><span class="overview-info"><strong>{{ offer.title }}</strong><small>{{ offer.company }} · {{ offer.remote_mode === 'remote' ? 'Zdalnie' : offer.location }}</small></span><span :class="['recommendation', overviewClass(offer)]">{{ overviewLabel(offer) }}</span><ChevronRight :size="18" /></button></div>
+        <div v-if="!offers.length" class="empty-card"><h3>Brak ofert</h3><button class="primary-button" :disabled="operation.status === 'running'" @click="openSyncDialog"><ArrowDownToLine :size="16" /> Pobierz oferty</button></div>
+        <div v-else class="overview-list"><button v-for="offer in offers.slice(0, 5)" :key="offer.id" class="overview-row" @click="openOffer(offer)"><span class="company-avatar">{{ offer.company?.slice(0, 1) || '?' }}</span><span class="overview-info"><strong>{{ offer.title }}</strong><small>{{ offer.company }} · {{ offer.remote_mode === 'remote' ? 'Zdalnie' : offer.location }} · {{ sourceLabel(offer.source) }}</small></span><span :class="['recommendation', overviewClass(offer)]">{{ overviewLabel(offer) }}</span><ChevronRight :size="18" /></button></div>
       </template>
 
       <template v-else-if="['offers', 'review', 'approved', 'rejected'].includes(section)">
@@ -455,9 +497,9 @@ onUnmounted(() => {
         <div v-if="section === 'review' && counters.review > counters.stale && decisionProfile" class="bulk-actions"><button class="primary-button" :disabled="!bulkEligible.approved" @click="bulkDecide('approved')"><Check :size="15" /> Zatwierdź ≥{{ decisionProfile.approve_min_score }}/100 <span v-if="bulkEligible.approved">({{ bulkEligible.approved }})</span></button><button class="soft-button danger" :disabled="!bulkEligible.rejected" @click="bulkDecide('rejected')"><ThumbsDown :size="15" /> Odrzuć &lt;{{ decisionProfile.reject_below_score }}/100 <span v-if="bulkEligible.rejected">({{ bulkEligible.rejected }})</span></button><span class="bulk-hint">Bez decyzji i z aktualną oceną · <button class="text-button" @click="pickSection('settings')">Zmień progi</button></span></div>
         <div class="list-toolbar"><div class="search-box"><Search :size="17" /><input v-model="search" placeholder="Szukaj stanowiska lub firmy…" /></div><span class="list-count">{{ visibleOffers.length }} {{ offerCountNoun(visibleOffers.length) }}</span></div>
         <div :class="['offers-layout', { 'empty-state': !visibleOffers.length }]">
-          <div class="offer-list"><div v-if="!visibleOffers.length" class="list-empty">{{ emptyListMessage }}</div><button v-for="offer in visibleOffers" :key="offer.id" :class="['offer-card', { selected: selectedId === offer.id }]" @click="selectedId = offer.id"><div class="offer-card-head"><span class="company-avatar">{{ offer.company?.slice(0, 1) || '?' }}</span><span :class="['recommendation', offerCardClass(offer)]">{{ offerCardLabel(offer) }}</span><span v-if="offer.evaluation" class="offer-score">{{ offer.evaluation.score }}/100</span></div><strong>{{ offer.title }}</strong><span class="company-name">{{ offer.company }}</span><div class="offer-meta"><span><MapPin :size="14" /> {{ offer.remote_mode === 'remote' ? 'Zdalnie' : offer.remote_mode === 'hybrid' ? 'Hybrydowo' : offer.location || 'Nieznane' }}</span><span><Wallet :size="14" /> {{ salaryText(offer.salary) }}</span></div><div class="offer-card-bottom"><span>{{ offer.contract_types.join(' / ') || 'Umowa nieznana' }}</span><span v-if="submittedOfferIds.has(offer.id)" class="approved-text"><Check :size="13" /> Wysłano</span><span v-else-if="pendingApprovedIds.has(offer.id)" class="approved-text"><Check :size="13" /> Zatwierdzona</span><span v-else-if="offer.decision === 'rejected' && offer.evaluation_stale" class="stale-text">Ocena nieaktualna</span></div></button></div>
-          <div v-if="selected" class="detail-panel"><div class="detail-top"><div class="detail-company"><span class="company-avatar large">{{ selected.company?.slice(0, 1) || '?' }}</span><div><span>OFERTA PRACY</span><h2>{{ selected.title }}</h2><p>{{ selected.company }} · {{ selected.location || 'Lokalizacja nieznana' }}</p></div></div><a :href="selected.url" target="_blank" rel="noopener noreferrer" class="icon-button" title="Otwórz oryginalną ofertę"><ExternalLink :size="18" /></a></div><div class="detail-badges"><span><MapPin :size="14" /> {{ selected.remote_mode === 'remote' ? 'W pełni zdalnie' : selected.remote_mode }}</span><span><BriefcaseBusiness :size="14" /> {{ selected.contract_types.join(' / ') || 'Nieznana umowa' }}</span><span><Wallet :size="14" /> {{ salaryText(selected.salary) }}</span></div>
-            <div class="detail-actions detail-actions-top"><button v-if="selected.evaluation && selectedApplication?.status !== 'submitted'" class="outline-button" :disabled="operation.status === 'running'" @click="startEvaluation([selected.id])"><RotateCw :size="15" /> Oceń ponownie</button><span class="actions-spacer"></span><span v-if="selectedApplication?.status === 'submitted'" class="submitted-label"><Check :size="15" /> Wysłano — decyzja jest zamknięta</span><template v-else-if="selected.decision === 'rejected'"><span class="rejected-label">Odrzucona</span><button class="outline-button" @click="decide('none')">Cofnij odrzucenie</button></template><template v-else><button class="soft-button danger" @click="decide('rejected')"><ThumbsDown :size="15" /> Odrzuć</button><button v-if="selected.decision === 'approved'" class="outline-button" @click="decide('none')">Cofnij zatwierdzenie</button><button v-else class="primary-button" :disabled="!selected.evaluation || selected.evaluation_stale" @click="decide('approved')"><Check :size="16" /> Zatwierdź</button></template></div>
+          <div class="offer-list"><div v-if="!visibleOffers.length" class="list-empty">{{ emptyListMessage }}</div><button v-for="offer in visibleOffers" :key="offer.id" :class="['offer-card', { selected: selectedId === offer.id }]" @click="selectedId = offer.id"><div class="offer-card-head"><span class="company-avatar">{{ offer.company?.slice(0, 1) || '?' }}</span><span class="source-badge">{{ sourceLabel(offer.source) }}</span><span :class="['recommendation', offerCardClass(offer)]">{{ offerCardLabel(offer) }}</span><span v-if="offer.evaluation" class="offer-score">{{ offer.evaluation.score }}/100</span></div><strong>{{ offer.title }}</strong><span class="company-name">{{ offer.company }}</span><div class="offer-meta"><span><MapPin :size="14" /> {{ offer.remote_mode === 'remote' ? 'Zdalnie' : offer.remote_mode === 'hybrid' ? 'Hybrydowo' : offer.location || 'Nieznane' }}</span><span><Wallet :size="14" /> {{ salaryText(offer.salary) }}</span></div><div class="offer-card-bottom"><span>{{ offer.contract_types.join(' / ') || 'Umowa nieznana' }}</span><span v-if="submittedOfferIds.has(offer.id)" class="approved-text"><Check :size="13" /> Wysłano</span><span v-else-if="pendingApprovedIds.has(offer.id)" class="approved-text"><Check :size="13" /> Zatwierdzona</span><span v-else-if="offer.decision === 'rejected' && offer.evaluation_stale" class="stale-text">Ocena nieaktualna</span></div></button></div>
+          <div v-if="selected" class="detail-panel"><div class="detail-top"><div class="detail-company"><span class="company-avatar large">{{ selected.company?.slice(0, 1) || '?' }}</span><div><span>OFERTA PRACY · {{ sourceLabel(selected.source) }}</span><h2>{{ selected.title }}</h2><p>{{ selected.company }} · {{ selected.location || 'Lokalizacja nieznana' }}</p></div></div><a :href="selected.url" target="_blank" rel="noopener noreferrer" class="icon-button" :title="`Otwórz oryginalną ofertę w ${sourceLabel(selected.source)}`"><ExternalLink :size="18" /></a></div><div class="detail-badges"><span class="source-detail-badge">Źródło: {{ sourceLabel(selected.source) }}</span><span><MapPin :size="14" /> {{ selected.remote_mode === 'remote' ? 'W pełni zdalnie' : selected.remote_mode }}</span><span><BriefcaseBusiness :size="14" /> {{ selected.contract_types.join(' / ') || 'Nieznana umowa' }}</span><span><Wallet :size="14" /> {{ salaryText(selected.salary) }}</span></div>
+            <div class="detail-actions detail-actions-top"><button v-if="selected.evaluation && selectedApplication?.status !== 'submitted'" class="outline-button" :disabled="operation.status === 'running'" @click="startEvaluation([selected.id])"><RotateCw :size="15" /> Oceń ponownie</button><span class="actions-spacer"></span><span v-if="selectedApplication?.status === 'submitted'" class="submitted-label"><Check :size="15" /> Wysłano — decyzja jest zamknięta</span><template v-else-if="selected.decision === 'rejected'"><span class="rejected-label">Odrzucona</span><button class="outline-button" @click="decide('none')">Cofnij odrzucenie</button></template><template v-else><button class="soft-button danger" @click="decide('rejected')"><ThumbsDown :size="15" /> Odrzuć</button><button v-if="selected.decision === 'approved'" class="outline-button" @click="decide('none')">Cofnij zatwierdzenie</button><button v-if="selectedApplication?.status === 'approved'" class="primary-button" @click="markSubmitted(selectedApplication)"><BadgeCheck :size="16" /> Wysłane</button><button v-else class="primary-button" :disabled="!selected.evaluation || selected.evaluation_stale" @click="decide('approved')"><Check :size="16" /> Zatwierdź</button></template></div>
             <div v-if="selected.evaluation_stale" class="stale-notice"><CircleAlert :size="16" /><span>Ocena nieaktualna. Oferta lub profil zmieniły się od czasu analizy. Oceń ponownie przed zatwierdzeniem.</span></div>
             <div v-if="selected.evaluation" class="evaluation-block"><div class="evaluation-heading"><div><span class="eyebrow">OCENA DOPASOWANIA</span><h3 :class="recommendationClass(selected)">{{ recommendationLabel(selected) }}</h3></div><div class="score-ring">{{ selected.evaluation.score }}<small>/100</small></div></div><p class="rationale">{{ selected.evaluation.rationale }}</p><div v-if="selected.evaluation.requirements?.length" class="eval-section"><h4><Search :size="17" /> Faktyczne wymagania oferty</h4><ul><li v-for="requirement in selected.evaluation.requirements" :key="requirement">{{ requirement }}</li></ul></div><div v-if="selected.evaluation.matches?.length" class="eval-section"><h4><BadgeCheck :size="17" /> Dlaczego pasujesz</h4><div v-for="(match, index) in selected.evaluation.matches" :key="index" class="evidence"><strong>{{ match.requirement }}</strong><p>{{ match.explanation }}</p><small>Dowód z CV: {{ candidateProfile?.facts.find((fact) => fact.id === match.candidate_fact_id)?.text || match.candidate_fact_id }}</small></div></div><div v-if="selected.evaluation.gaps?.length" class="eval-section"><h4><CircleAlert :size="17" /> Luki i ryzyka</h4><ul><li v-for="gap in selected.evaluation.gaps" :key="gap">{{ gap }}</li></ul></div><div v-if="selected.evaluation.unknowns?.length" class="eval-section"><h4><Search :size="17" /> Co warto sprawdzić</h4><ul><li v-for="unknown in selected.evaluation.unknowns" :key="unknown">{{ unknown }}</li></ul></div></div>
             <div v-else class="unevaluated"><h3>Brak oceny</h3><button class="primary-button" :disabled="operation.status === 'running'" @click="startEvaluation([selected.id])"><Sparkles :size="16" /> Oceń ofertę</button></div>
@@ -467,7 +509,7 @@ onUnmounted(() => {
         <div v-if="section === 'approved' && counters.approved" class="codex-banner"><strong>Aplikowanie</strong><span>W Codex: „Zaaplikuj na zatwierdzone oferty z GetMeAJob”.</span></div>
       </template>
 
-      <template v-else-if="section === 'history'"><div class="page-intro compact minimal-intro"><h1>Historia aplikacji</h1></div><div v-if="!applications.length" class="empty-card"><h3>Brak aplikacji</h3></div><div v-else class="history-table"><div class="table-header"><span>STANOWISKO</span><span>DATA</span><span>STATUS</span><span>AKCJA</span></div><div v-for="application in applications" :key="application.id" class="table-row"><div><strong>{{ offerForApplication(application)?.title || application.offer_id }}</strong><small>{{ offerForApplication(application)?.company }}</small></div><span>{{ new Date(application.approved_at).toLocaleDateString('pl-PL') }}</span><span :class="['history-status', application.status]">{{ application.status === 'submitted' ? 'Wysłano' : 'Zatwierdzono' }}</span><button v-if="application.status === 'approved'" class="text-button" @click="markSubmitted(application)">Oznacz wysłane</button><small v-else>{{ application.confirmation }}</small></div></div></template>
+      <template v-else-if="section === 'submitted'"><div class="page-intro compact minimal-intro"><h1>Wysłane</h1></div><div v-if="!submittedApplications.length" class="empty-card"><h3>Brak wysłanych aplikacji</h3></div><div v-else class="history-table submitted-table"><div class="table-header"><span>STANOWISKO</span><span>DATA WYSŁANIA</span><span>NOTATKA</span></div><div v-for="application in submittedApplications" :key="application.id" class="table-row"><div><strong>{{ offerForApplication(application)?.title || application.offer_id }}</strong><small>{{ offerForApplication(application)?.company }}</small></div><span>{{ new Date(application.submitted_at).toLocaleDateString('pl-PL') }}</span><small>{{ application.confirmation || '—' }}</small></div></div></template>
 
       <template v-else-if="section === 'settings' && searchProfile">
         <div class="page-intro compact minimal-intro"><h1>Ustawienia</h1><button class="primary-button" :disabled="saving" @click="saveSettings"><Check :size="16" /> Zapisz</button></div>
@@ -497,9 +539,10 @@ onUnmounted(() => {
       </template>
     </main>
 
+    <div v-if="showSync" class="modal-backdrop" @click.self="!syncStarting && (showSync = false, error = '')"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="sync-dialog-title"><h2 id="sync-dialog-title">Pobierz oferty</h2><p>Wybierz serwisy do przeszukania.</p><div class="sync-source-list"><label v-for="source in availableSources" :key="source.id" :class="['sync-source-option', { selected: selectedSyncSourceIds.includes(source.id) }]"><input v-model="selectedSyncSourceIds" type="checkbox" :value="source.id" :disabled="syncStarting" /><span>{{ source.label }}</span></label></div><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="syncStarting" @click="showSync = false; error = ''">Anuluj</button><button class="primary-button" :disabled="syncStarting || !selectedSyncSourceIds.length" @click="startSync">{{ syncStarting ? 'Uruchamiam…' : 'Pobierz z wybranych' }}</button></div></div></div>
     <div v-if="showImport" class="modal-backdrop" @click.self="showImport = false; error = ''"><div class="modal"><button class="modal-close" @click="showImport = false; error = ''"><X :size="18" /></button><h2>Dodaj ofertę</h2><p>Link z RocketJobs lub JustJoinIT</p><input v-model="importUrl" autofocus placeholder="https://justjoin.it/job-offer/…" @keyup.enter="importOffer" /><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" @click="showImport = false; error = ''">Anuluj</button><button class="primary-button" :disabled="saving || !importUrl.trim()" @click="importOffer">{{ saving ? 'Pobieram…' : 'Dodaj' }}</button></div></div></div>
     <div v-if="pendingBulkDecision" class="modal-backdrop" @click.self="!bulkSaving && (pendingBulkDecision = null, error = '')"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulk-dialog-title"><h2 id="bulk-dialog-title">{{ pendingBulkDecision.decision === 'approved' ? 'Zatwierdzić oferty?' : 'Odrzucić oferty?' }}</h2><p>{{ pendingBulkDecision.count }} {{ offerCountNoun(pendingBulkDecision.count) }} bez wcześniejszej decyzji, z aktualną oceną {{ pendingBulkDecision.decision === 'approved' ? `od ${pendingBulkDecision.threshold}` : `poniżej ${pendingBulkDecision.threshold}` }}/100. Akcja dotyczy wszystkich ofert, niezależnie od wyszukiwania.</p><p v-if="pendingBulkDecision.decision === 'approved'">CV nie zostanie wysłane automatycznie.</p><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="bulkSaving" @click="pendingBulkDecision = null; error = ''">Anuluj</button><button :class="pendingBulkDecision.decision === 'approved' ? 'primary-button' : 'soft-button danger'" :disabled="bulkSaving" @click="confirmBulkDecision">{{ bulkSaving ? 'Zapisuję…' : pendingBulkDecision.decision === 'approved' ? 'Zatwierdź oferty' : 'Odrzuć oferty' }}</button></div></div></div>
-    <div v-if="pendingSubmission" class="modal-backdrop" @click.self="!submissionSaving && (pendingSubmission = null, error = '')"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="submission-dialog-title"><h2 id="submission-dialog-title">Oznacz jako wysłane</h2><p>{{ offerForApplication(pendingSubmission)?.title || pendingSubmission.offer_id }}. Zapisz ten status dopiero po potwierdzeniu wysłania przez serwis rekrutacyjny.</p><div class="field"><label for="submission-confirmation">Potwierdzenie</label><input id="submission-confirmation" v-model="submissionConfirmation" placeholder="Numer zgłoszenia lub treść komunikatu" @keyup.enter="confirmSubmission" /></div><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="submissionSaving" @click="pendingSubmission = null; error = ''">Anuluj</button><button class="primary-button" :disabled="submissionSaving" @click="confirmSubmission">{{ submissionSaving ? 'Zapisuję…' : 'Oznacz wysłane' }}</button></div></div></div>
+    <div v-if="pendingSubmission" class="modal-backdrop" @click.self="!submissionSaving && (pendingSubmission = null, error = '')"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="submission-dialog-title"><h2 id="submission-dialog-title">Oznacz jako wysłane</h2><p>{{ offerForApplication(pendingSubmission)?.title || pendingSubmission.offer_id }}. Zapisz ten status dopiero po potwierdzeniu wysłania przez serwis rekrutacyjny.</p><div class="field"><label for="submission-confirmation">Notatka (opcjonalnie)</label><input id="submission-confirmation" v-model="submissionConfirmation" placeholder="Możesz zostawić puste" @keyup.enter="confirmSubmission" /></div><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="submissionSaving" @click="pendingSubmission = null; error = ''">Anuluj</button><button class="primary-button" :disabled="submissionSaving" @click="confirmSubmission">{{ submissionSaving ? 'Zapisuję…' : 'Oznacz wysłane' }}</button></div></div></div>
     <div v-if="showDatabaseReset" class="modal-backdrop" @click.self="!databaseResetSaving && (showDatabaseReset = false, error = '')"><div class="modal danger-modal" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title"><h2 id="reset-dialog-title">Wyczyścić całą bazę?</h2><p>Wszystkie oferty, oceny, decyzje, aplikacje i ustawienia zostaną usunięte. Przed resetem aplikacja zapisze kopię bezpieczeństwa.</p><div class="field"><label for="database-reset-confirmation">Aby potwierdzić, wpisz: <strong>USUŃ WSZYSTKO</strong></label><input id="database-reset-confirmation" v-model="databaseResetConfirmation" autofocus autocomplete="off" @keyup.enter="resetDatabase" /></div><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="databaseResetSaving" @click="showDatabaseReset = false; error = ''">Anuluj</button><button class="soft-button danger" :disabled="databaseResetSaving || databaseResetConfirmation !== 'USUŃ WSZYSTKO'" @click="resetDatabase">{{ databaseResetSaving ? 'Tworzę kopię i czyszczę…' : 'Tak, wyczyść wszystko' }}</button></div></div></div>
   </div>
 </template>

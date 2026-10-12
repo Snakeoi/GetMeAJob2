@@ -93,6 +93,39 @@
   gap: 10px;
 }
 
+.sync-report {
+  margin: 14px 32px 0;
+  padding: 12px 15px;
+  border: 1px solid #e3e8ee;
+  border-radius: 8px;
+  background: #fff;
+  color: #526478;
+  font-size: 11px;
+}
+
+.sync-report summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.sync-report-source {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  padding-top: 12px;
+  margin-top: 12px;
+  border-top: 1px solid #edf1f5;
+}
+
+.sync-report-source strong { color: #26394e; }
+.sync-report-source small { flex-basis: 100%; color: #718297; }
+.sync-report-source ul { flex-basis: 100%; margin: 3px 0 0; padding-left: 18px; }
+.sync-report-error { color: #a45764; }
+
+@media (max-width: 1150px) {
+  .sync-report { margin-left: 25px; margin-right: 25px; }
+}
+
 .stat-card {
   display: flex;
   flex-direction: column;
@@ -232,6 +265,34 @@
 .list-count {
   flex: none;
   white-space: nowrap;
+}
+
+.source-badge {
+  margin-right: auto;
+  border: 1px solid #dce5ef;
+  border-radius: 6px;
+  padding: 4px 7px;
+  background: #f6f9fc;
+  color: #60758d;
+  font-size: 9px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.source-detail-badge {
+  border-color: #dce5ef !important;
+  background: #f6f9fc !important;
+  color: #536d88 !important;
+  font-weight: 700;
+}
+
+.submitted-table .table-header,
+.submitted-table .table-row {
+  grid-template-columns: minmax(0, 2fr) minmax(110px, .7fr) minmax(0, 1.3fr);
+}
+
+.submitted-table .table-row {
+  text-align: left;
 }
 
 .offers-layout.empty-state {
@@ -381,6 +442,38 @@
 
 .modal h2 {
   margin-top: 0;
+}
+
+.sync-source-list {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 20px;
+}
+
+.sync-source-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 13px;
+  border: 1px solid #dce5ee;
+  border-radius: 9px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  color: #40556f;
+}
+
+.sync-source-option.selected {
+  border-color: #7eaff0;
+  background: #f2f7fe;
+}
+
+.sync-source-option input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: #2477e6;
 }
 
 .modal .modal-error {

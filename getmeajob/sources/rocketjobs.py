@@ -162,6 +162,9 @@ def prefilter(
 
 
 class RocketJobsSource:
+    source_id = "rocketjobs"
+    display_name = "RocketJobs"
+
     def __init__(self, client: httpx.Client | None = None, delay_seconds: float = 0.5):
         self.client = client or httpx.Client(
             follow_redirects=True,
