@@ -1,14 +1,36 @@
 from __future__ import annotations
 
+import hashlib
 import secrets
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 
-from .config import data_dir
+from .config import DEFAULT_SEARCH_PROFILE, data_dir
+from .resume_facts import extract_resume_facts
+from .search_profile import validate_search_profile
 from .service import BusyError, JobService
 from .store import Store
+
+
+def resume_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resume_display_name(store: Store, resume: str) -> tuple[str | None, bool]:
+    if not resume:
+        return None, False
+    original_name = store.get_setting("resume_original_name")
+    if original_name:
+        return original_name, True
+    if Path(resume).name != "resume.pdf":
+        return Path(resume).name, True
+    return Path(resume).name, False
 
 
 def create_app(service: JobService | None = None, storage_path: Path | None = None) -> Flask:
@@ -40,12 +62,20 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
     @app.get("/api/bootstrap")
     def bootstrap() -> Any:
         resume = store.get_setting("resume_path")
+        resume_file = Path(resume) if resume else None
+        current_hash = resume_hash(resume_file) if resume_file and resume_file.is_file() else None
+        resume_name, resume_name_known = resume_display_name(store, resume)
         return jsonify({
             "token": app.config["LOCAL_TOKEN"],
             "search_profile": store.get_setting("search_profile"),
             "decision_profile": store.get_setting("decision_profile"),
             "candidate_profile": store.get_setting("candidate_profile"),
-            "resume_name": Path(resume).name if resume else None,
+            "resume_name": resume_name,
+            "resume_name_known": resume_name_known,
+            "resume_facts_status": (
+                "missing" if current_hash is None else
+                "ready" if current_hash == store.get_setting("facts_resume_hash") else "needs-extraction"
+            ),
             "operation": service.operations.current(),
             "last_sync_report": store.get_setting("last_sync_report"),
             "sources": service.available_sources(),
@@ -64,6 +94,8 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
         payload = request.get_json(silent=True) or {}
         source_ids = payload.get("sources")
         service.selected_sources(source_ids)
+        if not store.get_setting("search_profile").get("roles"):
+            raise ValueError("Najpierw ustaw stanowiska w Ustawieniach")
         service.operations.start("sync", lambda report: service.sync(report, source_ids))
         return jsonify({"started": True}), 202
 
@@ -73,6 +105,8 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
         ids = payload.get("ids")
         if not isinstance(ids, list) or not ids or not all(isinstance(item, str) for item in ids):
             raise ValueError("Provide a non-empty list of offer IDs")
+        if not store.get_setting("candidate_profile").get("facts"):
+            raise ValueError("Najpierw wgraj CV i zapisz fakty kandydata w Ustawieniach")
         service.operations.start("evaluate", lambda report: service.evaluate(ids, report))
         return jsonify({"started": True}), 202
 
@@ -114,6 +148,11 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
         store.mark_submitted(offer_id, confirmation, str(payload.get("notes") or ""))
         return jsonify({"ok": True})
 
+    @app.post("/api/applications/<offer_id>/not-submitted")
+    def mark_not_submitted(offer_id: str) -> Any:
+        store.mark_not_submitted(offer_id)
+        return jsonify({"ok": True})
+
     @app.post("/api/database/reset")
     def reset_database() -> Any:
         payload = request.get_json(silent=True) or {}
@@ -128,10 +167,12 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
     def set_search_profile() -> Any:
         payload = request.get_json(silent=True) or {}
         current = store.get_setting("search_profile")
-        for key in current:
+        for key in set(current) | set(DEFAULT_SEARCH_PROFILE):
             if key in payload:
                 current[key] = payload[key]
-        if not isinstance(current["excluded_terms"], list):
+        if "work_modes" in current:
+            validate_search_profile(current)
+        elif not isinstance(current["excluded_terms"], list):
             raise ValueError("Wykluczone frazy muszą być listą")
         store.set_setting("search_profile", current)
         return jsonify(current)
@@ -154,26 +195,72 @@ def create_app(service: JobService | None = None, storage_path: Path | None = No
     @app.put("/api/candidate-profile")
     def set_candidate_profile() -> Any:
         payload = request.get_json(silent=True) or {}
-        if not isinstance(payload.get("facts"), list) or not payload["facts"]:
-            raise ValueError("Profil musi zawierać fakty z CV")
+        extracted_hash = payload.pop("extracted_resume_hash", None)
+        if not isinstance(payload.get("facts"), list):
+            raise ValueError("Fakty z CV muszą być listą")
         for fact in payload["facts"]:
             if not isinstance(fact, dict) or not fact.get("id") or not fact.get("text"):
                 raise ValueError("Każdy fakt wymaga id i tekstu")
-        store.set_setting("candidate_profile", payload)
+        if extracted_hash is not None:
+            resume = store.get_setting("resume_path")
+            if (not isinstance(extracted_hash, str) or not resume or not Path(resume).is_file()
+                    or extracted_hash != resume_hash(Path(resume))):
+                raise ValueError("CV zmieniło się od czasu analizy. Wyciągnij fakty ponownie.")
+        store.set_candidate_profile(payload, extracted_hash)
         return jsonify(payload)
 
     @app.post("/api/resume")
     def upload_resume() -> Any:
+        if service.operations.current()["status"] == "running" and service.operations.current()["kind"] == "resume-facts":
+            raise BusyError("Poczekaj na zakończenie analizy CV")
         file = request.files.get("file")
         if not file or not file.filename or not file.filename.lower().endswith(".pdf"):
             raise ValueError("Wybierz plik CV w formacie PDF")
         contents = file.read()
         if not contents.startswith(b"%PDF-"):
             raise ValueError("Plik nie jest poprawnym PDF")
+        original_name = Path(file.filename.replace("\\", "/")).name
+        original_name = "".join(char for char in original_name if ord(char) >= 32 and ord(char) != 127).strip()
+        original_name = f"{original_name[:-4][:196]}{original_name[-4:]}" if original_name else "CV.pdf"
         destination = store.path.parent / "resume.pdf"
         destination.write_bytes(contents)
-        store.set_setting("resume_path", str(destination))
-        return jsonify({"resume_name": destination.name})
+        store.set_resume(destination, original_name)
+        return jsonify({
+            "resume_name": original_name,
+            "resume_name_known": True,
+            "resume_facts_status": "ready" if resume_hash(destination) == store.get_setting("facts_resume_hash") else "needs-extraction",
+        })
+
+    @app.get("/api/resume/preview")
+    def resume_preview() -> Any:
+        if request.headers.get("X-Local-Token") != app.config["LOCAL_TOKEN"]:
+            return jsonify({"error": "Invalid local session token"}), 403
+        resume = store.get_setting("resume_path")
+        if not resume or not Path(resume).is_file():
+            raise ValueError("Brak CV do podglądu")
+        name, _ = resume_display_name(store, resume)
+        response = send_file(resume, mimetype="application/pdf", as_attachment=False, download_name=name)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+    @app.post("/api/resume/extract-facts")
+    def resume_extract_facts() -> Any:
+        resume = store.get_setting("resume_path")
+        if not resume or not Path(resume).is_file():
+            raise ValueError("Najpierw wgraj CV w formacie PDF")
+        resume_path = Path(resume)
+        source_hash = resume_hash(resume_path)
+
+        def work(report: Any) -> dict[str, Any]:
+            report("Analizuję CV…")
+            facts = extract_resume_facts(resume_path, service.evaluator)
+            if source_hash != resume_hash(resume_path):
+                raise ValueError("CV zmieniło się podczas analizy. Wyciągnij fakty ponownie.")
+            return {"facts": facts, "resume_hash": source_hash}
+
+        service.operations.start("resume-facts", work)
+        return jsonify({"started": True}), 202
 
     @app.get("/")
     def index() -> Any:

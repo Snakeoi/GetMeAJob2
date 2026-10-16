@@ -1,7 +1,7 @@
 import json
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from getmeajob.config import DEFAULT_CANDIDATE_PROFILE, DEFAULT_SEARCH_PROFILE
+from tests.profile_fixtures import SAMPLE_CANDIDATE_PROFILE as DEFAULT_CANDIDATE_PROFILE, SAMPLE_SEARCH_PROFILE as DEFAULT_SEARCH_PROFILE
 from getmeajob.sources.pracuj import PracujSource, SEARCH_TERMS, parse_job_page, parse_reader_search, parse_search_page
 from getmeajob.sources.rocketjobs import prefilter
 

@@ -26,8 +26,9 @@ RESULT_SCHEMA: dict[str, Any] = {
                     "requirement": {"type": "string"},
                     "candidate_fact_id": {"type": "string"},
                     "explanation": {"type": "string"},
+                    "summary": {"type": "string"},
                 },
-                "required": ["requirement", "candidate_fact_id", "explanation"],
+                "required": ["requirement", "candidate_fact_id", "explanation", "summary"],
                 "additionalProperties": False,
             },
         },
@@ -40,6 +41,15 @@ RESULT_SCHEMA: dict[str, Any] = {
 
 
 def salary_is_confirmed(offer: dict[str, Any], profile: dict[str, Any]) -> bool:
+    thresholds = {
+        "UoP": profile.get("minimum_uop_gross_pln_month", 0),
+        "B2B": profile.get("minimum_b2b_net_pln_month", 0),
+    }
+    contracts = set(offer.get("contract_types") or []) & set(profile.get("contract_types") or [])
+    if not contracts:
+        contracts = set(profile.get("contract_types") or [])
+    if contracts and all(thresholds[contract] == 0 for contract in contracts):
+        return True
     salary = offer.get("salary") or {}
     if salary.get("currency") != "PLN" or salary.get("unit") != "month":
         return False
@@ -47,9 +57,9 @@ def salary_is_confirmed(offer: dict[str, Any], profile: dict[str, Any]) -> bool:
     if minimum is None:
         return False
     basis = salary.get("basis", "")
-    if basis.startswith("uop_"):
+    if basis.startswith("uop_") and "UoP" in contracts:
         return minimum >= profile["minimum_uop_gross_pln_month"]
-    if basis.startswith("b2b_"):
+    if basis.startswith("b2b_") and "B2B" in contracts:
         return minimum >= profile["minimum_b2b_net_pln_month"]
     return False
 
@@ -70,7 +80,7 @@ def normalize_result(result: dict[str, Any], offer: dict[str, Any], profile: dic
         return remote_rejection_result(remote_reason)
     if not salary_is_confirmed(offer, profile):
         if not any("wynagrodzen" in item.lower() or "pensj" in item.lower() for item in result["unknowns"]):
-            result["unknowns"].append("Oferta nie potwierdza wynagrodzenia od 20 000 PLN miesięcznie we właściwej podstawie.")
+            result["unknowns"].append("Oferta nie potwierdza ustawionego minimalnego wynagrodzenia miesięcznego we właściwej podstawie.")
         if result["recommendation"] == "aplikuj":
             result["recommendation"] = "sprawdź"
     if result["recommendation"] == "aplikuj" and not result["matches"]:
@@ -82,10 +92,16 @@ def normalize_result(result: dict[str, Any], offer: dict[str, Any], profile: dic
 class CodexEvaluator:
     name = "codex"
 
-    def __init__(self, executable: str = "codex", timeout_seconds: int = 180, model: str | None = None):
-        self.executable = executable
+    def __init__(self, executable: str | None = None, timeout_seconds: int = 180, model: str | None = None):
+        bundled = (
+            Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+            Path("/Applications/Codex.app/Contents/Resources/codex"),
+        )
+        self.executable = executable or os.environ.get("GETMEAJOB_CODEX_EXECUTABLE") or next(
+            (str(path) for path in bundled if path.is_file() and os.access(path, os.X_OK)), "codex"
+        )
         self.timeout_seconds = timeout_seconds
-        self.model = model or os.environ.get("GETMEAJOB_CODEX_MODEL", "gpt-5.5")
+        self.model = model or os.environ.get("GETMEAJOB_CODEX_MODEL") or None
 
     def evaluate(self, offer: dict[str, Any], profile: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
         payload = {
@@ -103,6 +119,11 @@ class CodexEvaluator:
             "W polu requirements wypisz konkretne, faktyczne wymagania oferty: technologie, doświadczenie, "
             "obowiązki, język, tryb i miejsce pracy oraz umowę; nie zastępuj ich ogólnym podsumowaniem. "
             "W polu matches wskaż konkretne wymaganie oferty, id faktu z CV i wyjaśnij związek. "
+            "Każdy matches.summary to krótki punkt (najlepiej 5–12 słów), np. 'Potwierdzona znajomość **Flask**'. "
+            "Zachowaj zastrzeżenia: doświadczenie pokrewne lub częściowe nie oznacza potwierdzonej umiejętności. "
+            "Każda pozycja gaps to krótki punkt o jednym braku, np. 'Brak potwierdzonej znajomości **Django**'. "
+            "W summary i gaps wyróżnij przez **...** najwyżej 1–2 kluczowe technologie lub kompetencje. "
+            "Szczegóły i dowody pozostaw w explanation. Nie dodawaj znaczników listy do tekstu punktów. "
             "Uzasadnienie ma wyjaśniać dlaczego kandydat się nadaje albo nie, z uwzględnieniem braków. "
             "Jeśli wynagrodzenie, tryb pracy lub umowa są niepewne, uwzględnij to w unknowns. "
             "Wynik i język odpowiedzi: polski.\n\nDANE:\n"
@@ -114,7 +135,8 @@ class CodexEvaluator:
             output_path = tmp_path / "result.json"
             schema_path.write_text(json.dumps(RESULT_SCHEMA, ensure_ascii=False), encoding="utf-8")
             command = [
-                self.executable, "exec", "--ephemeral", "--ignore-user-config", "--model", self.model,
+                self.executable, "exec", "--ephemeral", "--ignore-user-config",
+                *(["--model", self.model] if self.model else []),
                 "--skip-git-repo-check", "--sandbox", "read-only",
                 "--output-schema", str(schema_path), "--output-last-message", str(output_path),
                 "-",
@@ -130,7 +152,9 @@ class CodexEvaluator:
                     f"Ocena oferty przekroczyła limit {self.timeout_seconds} sekund"
                 ) from exc
             if completed.returncode != 0 or not output_path.exists():
-                detail = (completed.stderr or completed.stdout)[-1000:]
+                # stderr can echo the entire prompt, including candidate facts.
+                errors = [line for line in completed.stderr.splitlines() if line.startswith("ERROR:")]
+                detail = errors[-1][:1000] if errors else f"Kod zakończenia: {completed.returncode}; brak wyniku oceny."
                 raise RuntimeError(f"Codex evaluation failed: {detail}")
             try:
                 result = json.loads(output_path.read_text(encoding="utf-8"))

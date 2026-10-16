@@ -9,6 +9,7 @@ dependencies = [
   "httpx>=0.28,<1",
   "pywebview>=6.0,<7",
   "mcp>=1.0,<2",
+  "pypdf>=5,<7",
 ]
 
 [project.optional-dependencies]

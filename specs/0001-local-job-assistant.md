@@ -34,7 +34,17 @@ Widok `Zatwierdzone` pokazuje wyłącznie aplikacje oczekujące na wysłanie; wy
 
 Widok `Oferty` pokazuje wyłącznie pozycje bez oceny AI i bez decyzji użytkownika. Po ocenie pozycja przechodzi do `Do sprawdzenia`; nieaktualne oceny również pozostają tam, z wyraźnym oznaczeniem i akcją ponownej analizy. Decyzje zbiorcze dotyczą tylko aktualnie ocenionych ofert bez decyzji. Widok `Odrzucone` pozwala odnaleźć starszą ofertę i w razie potrzeby cofnąć odrzucenie.
 
-## Profil poszukiwania v1
+Widok `Wysłane` korzysta z tej samej listy, wyszukiwarki i szczegółów oferty co pozostałe kolejki. Pokazuje datę i potwierdzenie wysłania. Przycisk `Nie wysłane` przywraca aplikację do zatwierdzonych, usuwając datę, potwierdzenie i notatkę wysłania.
+
+W ustawieniach przycisk `Wyciągnij fakty z CV` odczytuje aktualnie wgrany PDF i przygotowuje fakty za pomocą Codex. Wynik trafia do edytowalnego pola, a profil kandydata zmienia się dopiero po przejrzeniu faktów i kliknięciu `Zapisz`. Aplikacja wiąże zapisane fakty z hashem zawartości PDF: po wgraniu innego CV przypomina o ponownej analizie, a po wgraniu identycznego pliku pokazuje, że fakty już zapisano dla tego CV. Niezapisana propozycja faktów nie daje statusu ukończenia. PDF bez warstwy tekstowej wymaga OCR.
+
+Wgranie CV zachowuje oryginalną nazwę pliku jako metadane przy lokalnej kopii `resume.pdf`. Dla wcześniej wgranych plików bez tej informacji interfejs pokazuje nazwę lokalnej kopii i wyjaśnia, że ponowne wgranie przywróci dokładną nazwę pliku; nie używa tytułu zapisanego wewnątrz PDF. Przycisk `Podgląd CV` otwiera aktualny PDF w oknie aplikacji; trasa podglądu wymaga lokalnego tokenu sesji i nie przechowuje wyniku w pamięci podręcznej.
+
+## Profil poszukiwania
+
+Każda instalacja przechowuje własny profil. Nowa instalacja nie zawiera danych osobowych ani domyślnych ról. W ustawieniach użytkownik wybiera stanowiska, tryby pracy (zdalny, hybrydowy, stacjonarny), miasta dopuszczalne dla hybrydy i pracy stacjonarnej, formy zatrudnienia UoP/B2B oraz osobne minimalne kwoty miesięczne w PLN. Zero oznacza brak minimum. Wyszukiwanie ofert korzysta z zapisanych stanowisk, a pobieranie jest niedostępne do czasu ich podania. Ocena wymaga zapisanych faktów kandydata.
+
+Poniższe kryteria są historycznym przykładem profilu obecnego użytkownika. Istniejące ustawienia zapisane w bazie pozostają zachowane po aktualizacji.
 
 - Stanowisko: Python Developer albo Full Stack Developer z Vue.
 - Tryb pracy: zdalny albo dowolny tryb w lokalizacji kandydata potwierdzonej przez CV.
@@ -50,7 +60,7 @@ Jeżeli oferta podaje górną granicę wynagrodzenia poniżej progu dla danego t
 ## Zakres pierwszego działającego przyrostu
 
 1. Użytkownik zapisuje profil poszukiwania: role, lokalizacje, tryb pracy, rodzaj umowy, minimum finansowe, technologie i wykluczenia.
-2. Konektory RocketJobs, JustJoinIT i Pracuj.pl odkrywają oferty z publicznych map lub wyników wyszukiwania, pobierają szczegóły ze stron ofert i zapisują je bez duplikatów. JustJoinIT sprawdza maksymalnie 300 najświeższych kandydatów z pasującą nazwą roli na synchronizację. Pracuj.pl sprawdza do 6 stron dla każdej z fraz `python developer`, `backend python`, `full stack vue`; ma limit 100 kandydatów na frazę i 300 łącznie oraz opóźnienie między żądaniami. Deduplikacja między frazami nie pozbawia kolejnej frazy własnego limitu. Limity chronią przed nieograniczonym pobieraniem i są jawne w raporcie.
+2. Konektory RocketJobs, JustJoinIT i Pracuj.pl odkrywają oferty z publicznych map lub wyników wyszukiwania, pobierają szczegóły ze stron ofert i zapisują je bez duplikatów. JustJoinIT sprawdza maksymalnie 300 najświeższych kandydatów z pasującą nazwą roli na synchronizację. Pracuj.pl używa fraz z zapisanych stanowisk i sprawdza ograniczoną liczbę stron oraz ofert na frazę, z opóźnieniem między żądaniami. Deduplikacja między frazami nie pozbawia kolejnej frazy własnego limitu. Limity chronią przed nieograniczonym pobieraniem i są jawne w raporcie.
 3. Aplikacja oznacza nowe i zmienione oferty. Wykrywanie wygasłych ofert pozostaje do wykonania.
 4. Agent ocenia każdą ofertę według profilu kandydata i profilu poszukiwania. Użytkownik może uruchomić ocenę pojedynczej oferty albo jedną operację dla wszystkich ofert bez aktualnej oceny. Wynik zawiera rekomendację, uzasadnienie, braki, niepewności oraz odwołania do konkretnych fragmentów oferty i CV.
 5. Użytkownik widzi kolejkę ofert i może oznaczyć ofertę jako interesującą, odrzuconą lub wymagającą ponownej oceny.
@@ -114,7 +124,7 @@ Bez logowania do aplikacji. Minimalne środki: nasłuchiwanie na loopback, CV i 
 - Oferta odrzucona przez twardy warunek ma widoczny powód.
 - Ocena nie przypisuje kandydatowi kompetencji niepotwierdzonej przez CV albo ręczny profil.
 - Każdą rekomendację można prześledzić do faktów z profilu i treści oferty.
-- Akcja `Oceń nieocenione oferty` przekazuje do jednej operacji oferty bez oceny i bez decyzji. Osobna akcja ponawia analizę ofert z nieaktualną oceną. Obie pomijają już rozstrzygnięte pozycje.
+- Akcja `Oceń nieocenione oferty` przekazuje do jednej operacji oferty bez oceny i bez decyzji. Osobna akcja ponawia analizę ofert z nieaktualną oceną, pomijając odrzucone i wysłane; obejmuje nadal zatwierdzone oferty oczekujące na wysłanie. Bezpośrednie żądanie oceny odrzuconej lub wysłanej oferty jest pomijane przez serwer.
 - Operacja ocenia najwyżej dwie oferty równolegle, pokazuje liczbę ukończonych ocen i czas trwania całej serii. Błąd lub przekroczenie limitu czasu jednej oferty nie zatrzymuje pozostałych.
 - Rekomendacja `aplikuj` pokazuje zrozumiałe uzasadnienie dopasowania, a nie tylko wynik liczbowy.
 - Uzasadnienie wymienia co najmniej jeden fakt z CV i odpowiadające mu wymaganie lub obowiązek z ogłoszenia; luki i niewiadome są pokazane oddzielnie.
@@ -130,3 +140,15 @@ Bez logowania do aplikacji. Minimalne środki: nasłuchiwanie na loopback, CV i 
 - Codex App Server: https://learn.chatgpt.com/docs/app-server
 - LM Studio Bionic: https://lmstudio.ai/docs/bionic
 - LM Studio lokalny API: https://lmstudio.ai/docs/developer/core/server
+
+## Konektor No Fluff Jobs
+
+Źródło `nofluffjobs` jest dostępne w wyborze serwisów i imporcie pojedynczego linku `/pl/job/…` lub `/job/…`. Pobiera publiczny HTML z osadzonym `serverApp-state`, bez prywatnego API. Sprawdza robots.txt i domenę każdego przekierowania. Wyszukuje według stanowisk z profilu, do 3 stron i 60 kandydatów na stanowisko, z opóźnieniem 0,5 s między żądaniami. Powtarzające się wyniki są deduplikowane w ramach synchronizacji. Raport zawiera limity, liczbę stron, pozycji, kandydatów i błędy szczegółów; błąd listy przerywa synchronizację z raportem częściowym.
+
+Parser zachowuje opis, wymagania, języki, obowiązki, lokalizacje, tryb pracy i oryginalne stawki. Nie przelicza jednostek godzinowych/dziennych na miesiąc ani walut. Przy wielu typach umów zachowuje widełki osobno w opisie, pozostawiając wspólne pole stawki nieokreślone. Nie odczytuje danych podobnych ofert jako danych bieżącej oferty.
+
+## Konektory Bulldogjob i SOLID.Jobs
+
+Źródła `bulldogjob` i `solidjobs` korzystają z publicznych map ogłoszeń oraz stron ofert. Konektory sprawdzają robots.txt, domenę przekierowań i ograniczają odczyt do 150 najnowszych kandydatów z nazwą odpowiadającą stanowiskom zapisanym w profilu. Dla Bulldogjob używana jest oficjalna domena `bulldogjob.com`, ponieważ polska domena zwraca stronę ochronną Cloudflare; import linku `.pl` jest przekształcany na odpowiadający adres `.com`. W raporcie zapisuje się liczbę pozycji w mapie, kandydatów i błędów szczegółów.
+
+theprotocol.it udostępnia mapę aktualnych ofert wskazaną w robots.txt, ale zarówno mapa, jak i lista oraz szczegóły ofert zwracają lokalnemu klientowi HTTP ekran ochronny Cloudflare. Publiczny podgląd tekstowy również zwraca ekran ochronny. Konektor nie jest rejestrowany, dopóki nie będzie dostępnej ścieżki odczytu, którą można zweryfikować na aktualnych ogłoszeniach.

@@ -117,6 +117,32 @@ class Store:
                 (key, json.dumps(value, ensure_ascii=False)),
             )
 
+    def set_resume(self, path: Path, original_name: str) -> None:
+        with self.connection() as conn:
+            conn.executemany(
+                "INSERT INTO settings(key, value_json) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                (
+                    ("resume_path", json.dumps(str(path))),
+                    ("resume_original_name", json.dumps(original_name, ensure_ascii=False)),
+                ),
+            )
+
+    def set_candidate_profile(self, profile: dict[str, Any], resume_hash: str | None = None) -> None:
+        """Save reviewed facts and their source CV in one transaction."""
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT INTO settings(key, value_json) VALUES ('candidate_profile', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                (json.dumps(profile, ensure_ascii=False),),
+            )
+            if resume_hash is not None:
+                conn.execute(
+                    "INSERT INTO settings(key, value_json) VALUES ('facts_resume_hash', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                    (json.dumps(resume_hash),),
+                )
+
     def reset_all(self) -> Path:
         """Back up the database, then restore it to a fresh-install state."""
         backup_dir = self.path.parent / "backups"
@@ -336,6 +362,16 @@ class Store:
                 "UPDATE applications SET status='submitted', submitted_at=?, confirmation=?, notes=? WHERE offer_id=?",
                 (utc_now(), confirmation, notes, offer_id),
             )
+
+    def mark_not_submitted(self, offer_id: str) -> None:
+        with self.connection() as conn:
+            result = conn.execute(
+                "UPDATE applications SET status='approved', submitted_at=NULL, confirmation='', notes='' "
+                "WHERE offer_id=? AND status='submitted'",
+                (offer_id,),
+            )
+            if result.rowcount != 1:
+                raise ValueError("Aplikacja nie jest oznaczona jako wysłana")
 
     def applications(self) -> list[dict[str, Any]]:
         with self.connection() as conn:

@@ -54,6 +54,20 @@ def assess_remote_requirement(
     offer: dict[str, Any], profile: dict[str, Any], candidate: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Accept remote work, or any work mode in a location verified by the CV."""
+    if "work_modes" in profile:
+        modes = set(profile["work_modes"])
+        description = " ".join(str(offer.get("description") or "").split())
+        mode = offer.get("remote_mode")
+        if mode == "remote" and any(pattern.search(description) for pattern in REMOTE_CONTRADICTIONS):
+            mode = "hybrid" if re.search(r"hybrid|hybryd", description, re.I) else "onsite"
+        if mode not in modes:
+            return False, "Tryb pracy nie należy do wybranych"
+        if mode in {"hybrid", "onsite"}:
+            allowed = {str(city).strip() for city in profile.get("work_locations", []) if str(city).strip()}
+            offer_location = _normalized(str(offer.get("location") or ""))
+            if not allowed or not any(re.search(rf"(?<!\w){re.escape(_normalized(city))}(?!\w)", offer_location) for city in allowed):
+                return False, "Oferta jest poza wybranymi lokalizacjami pracy"
+        return True, ""
     if not profile.get("remote_only"):
         return True, ""
 
@@ -81,7 +95,7 @@ def remote_rejection_result(reason: str) -> dict[str, Any]:
         "recommendation": "pomiń",
         "score": 0,
         "confidence": "wysoka",
-        "rationale": f"Oferta nie spełnia twardego warunku pełnej pracy zdalnej. {reason}.",
+        "rationale": f"Oferta nie spełnia ustawionych warunków trybu lub lokalizacji pracy. {reason}.",
         "requirements": [reason],
         "matches": [],
         "gaps": [reason],

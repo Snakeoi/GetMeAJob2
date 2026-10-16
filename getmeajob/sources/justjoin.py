@@ -12,6 +12,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .rocketjobs import _text, _xml_locations
+from ..search_profile import slug_matches_roles
 
 
 SITEMAP_URL = "https://justjoin.it/sitemaps/active-jobs.xml"
@@ -124,7 +125,7 @@ class JustJoinSource:
             raise ValueError("Unexpected redirect outside JustJoinIT")
         return response.text
 
-    def discover(self) -> list[tuple[str, str | None]]:
+    def discover(self, profile: dict[str, Any] | None = None) -> list[tuple[str, str | None]]:
         robots = RobotFileParser()
         robots.parse(self._get(ROBOTS_URL).splitlines())
         pending = [SITEMAP_URL]
@@ -142,15 +143,15 @@ class JustJoinSource:
                 if parsed.netloc != "justjoin.it" or not parsed.path.startswith("/job-offer/"):
                     continue
                 slug = parsed.path.rsplit("/", 1)[-1]
-                if not (PYTHON_ROLE.search(slug) or FULLSTACK_ROLE.search(slug)):
+                if not (slug_matches_roles(slug, profile["roles"]) if profile else PYTHON_ROLE.search(slug) or FULLSTACK_ROLE.search(slug)):
                     continue
                 if robots.can_fetch(USER_AGENT, url):
                     found.append((url, lastmod))
         found.sort(key=lambda item: item[1] or "", reverse=True)
         return found[: self.max_candidates]
 
-    def offers(self, progress: Callable[[int, int], None] | None = None) -> Iterator[dict[str, Any]]:
-        urls = self.discover()
+    def offers(self, progress: Callable[[int, int], None] | None = None, profile: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
+        urls = self.discover(profile)
         for index, (url, lastmod) in enumerate(urls, 1):
             try:
                 yield parse_job_page(url, self._get(url), lastmod)

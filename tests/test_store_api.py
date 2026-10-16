@@ -5,6 +5,7 @@ from getmeajob.api import create_app
 from getmeajob.evaluation import normalize_result
 from getmeajob.service import JobService
 from getmeajob.store import Store
+from tests.profile_fixtures import SAMPLE_CANDIDATE_PROFILE, SAMPLE_SEARCH_PROFILE
 
 
 OFFER = {
@@ -80,6 +81,33 @@ def test_submission_note_is_saved_when_provided(tmp_path):
     assert store.applications()[0]["confirmation"] == "Dziękujemy za aplikację"
 
 
+def test_undo_submission_restores_approved_application(tmp_path):
+    store = Store(tmp_path / "db.sqlite3")
+    store.upsert_offer(OFFER)
+    offer_id = store.list_offers()[0]["id"]
+    store.save_evaluation(offer_id, evaluation(), "test")
+    store.set_decision(offer_id, "approved")
+    original = store.applications()[0]
+    client = create_app(storage_path=store.path).test_client()
+    headers = {"X-Local-Token": client.get("/api/bootstrap").json["token"]}
+    endpoint = f"/api/applications/{offer_id}/not-submitted"
+    assert client.post(endpoint, headers=headers).status_code == 400
+    store.mark_submitted(offer_id, "Potwierdzenie", "Notatka")
+    assert client.post(endpoint).status_code == 403
+    assert store.applications()[0]["status"] == "submitted"
+    assert client.post(endpoint, headers=headers).status_code == 200
+    restored = store.applications()[0]
+    assert restored["id"] == original["id"]
+    assert restored["approved_at"] == original["approved_at"]
+    assert restored["status"] == "approved"
+    assert restored["submitted_at"] is None
+    assert restored["confirmation"] == restored["notes"] == ""
+    assert store.get_offer(offer_id)["decision"] == "approved"
+    assert client.post(endpoint, headers=headers).status_code == 400
+    assert client.post("/api/applications/missing/not-submitted", headers=headers).status_code == 400
+    assert client.post(f"/api/applications/{offer_id}/submitted", json={}, headers=headers).status_code == 200
+
+
 def test_sync_uses_only_selected_sources(tmp_path):
     class FakeSource:
         def __init__(self, source_id, display_name):
@@ -92,6 +120,7 @@ def test_sync_uses_only_selected_sources(tmp_path):
             return iter(())
 
     store = Store(tmp_path / "db.sqlite3")
+    store.set_setting("search_profile", SAMPLE_SEARCH_PROFILE)
     sources = [FakeSource("rocketjobs", "RocketJobs"), FakeSource("justjoin", "JustJoinIT"), FakeSource("pracuj", "Pracuj.pl")]
     service = JobService(store, source=sources[0])
     service.sources = sources
@@ -129,6 +158,7 @@ def test_sync_persists_counts_and_rejection_reasons_by_source(tmp_path):
             yield {**OFFER, "source": "pracuj", "url": "https://www.pracuj.pl/praca/python,oferta,2", "remote_mode": "hybrid"}
 
     store = Store(tmp_path / "db.sqlite3")
+    store.set_setting("search_profile", SAMPLE_SEARCH_PROFILE)
     service = JobService(store, source=FakeSource())
     result = service.sync(lambda *_args: None)
 
@@ -148,6 +178,7 @@ def test_failed_sync_persists_partial_report(tmp_path):
             raise RuntimeError("Źródło nie odpowiada")
 
     store = Store(tmp_path / "db.sqlite3")
+    store.set_setting("search_profile", SAMPLE_SEARCH_PROFILE)
     service = JobService(store, source=FailingSource())
 
     try:
@@ -195,8 +226,8 @@ def test_database_reset_requires_phrase_and_creates_recoverable_backup(tmp_path)
 
 def test_unknown_salary_cannot_be_recommended_to_apply(tmp_path):
     store = Store(tmp_path / "db.sqlite3")
-    candidate = store.get_setting("candidate_profile")
-    profile = store.get_setting("search_profile")
+    candidate = SAMPLE_CANDIDATE_PROFILE
+    profile = SAMPLE_SEARCH_PROFILE
     offer = {**OFFER, "salary": {"minimum": None, "maximum": None, "currency": None, "unit": None, "basis": "unknown"}}
     result = normalize_result(evaluation(), offer, profile, candidate)
     assert result["recommendation"] == "sprawdź"
@@ -205,8 +236,8 @@ def test_unknown_salary_cannot_be_recommended_to_apply(tmp_path):
 
 def test_hybrid_description_overrides_remote_metadata(tmp_path):
     store = Store(tmp_path / "db.sqlite3")
-    candidate = store.get_setting("candidate_profile")
-    profile = store.get_setting("search_profile")
+    candidate = SAMPLE_CANDIDATE_PROFILE
+    profile = SAMPLE_SEARCH_PROFILE
     offer = {**OFFER, "description": "Hybrid by design. Two days per week in the office."}
     result = normalize_result(evaluation(), offer, profile, candidate)
     assert result["recommendation"] == "pomiń"
@@ -253,6 +284,43 @@ def test_stale_evaluation_cannot_be_approved(tmp_path):
     assert response.status_code == 400
 
 
+def test_reevaluation_skips_rejected_and_submitted_but_keeps_pending_approved(tmp_path):
+    class FakeEvaluator:
+        name = "test"
+
+        def __init__(self):
+            self.evaluated_ids = []
+
+        def evaluate(self, offer, _profile, _candidate):
+            self.evaluated_ids.append(offer["id"])
+            return evaluation()
+
+    store = Store(tmp_path / "db.sqlite3")
+    store.set_setting("candidate_profile", SAMPLE_CANDIDATE_PROFILE)
+    ids = {}
+    for state in ("open", "approved", "rejected", "submitted"):
+        original = {**OFFER, "url": f"{OFFER['url']}-{state}", "title": f"Python Developer {state}"}
+        store.upsert_offer(original)
+        offer_id = next(offer["id"] for offer in store.list_offers() if offer["url"] == original["url"])
+        ids[state] = offer_id
+        store.save_evaluation(offer_id, evaluation(), "test")
+        if state != "open":
+            store.set_decision(offer_id, "approved" if state in {"approved", "submitted"} else "rejected")
+        if state == "submitted":
+            store.mark_submitted(offer_id)
+        store.upsert_offer({**original, "description": "Updated requirements for Python and Vue"})
+        assert store.get_offer(offer_id)["evaluation_stale"]
+
+    evaluator = FakeEvaluator()
+    result = JobService(store, evaluator=evaluator).evaluate(list(ids.values()), lambda *_args: None)
+
+    assert set(result["completed"]) == {ids["open"], ids["approved"]}
+    assert {error["id"] for error in result["errors"]} == {ids["rejected"], ids["submitted"]}
+    assert set(evaluator.evaluated_ids) == {ids["open"], ids["approved"]}
+    assert store.get_offer(ids["rejected"])["evaluation_stale"]
+    assert store.get_offer(ids["submitted"])["evaluation_stale"]
+
+
 def test_bulk_evaluation_processes_every_requested_offer(tmp_path):
     class FakeEvaluator:
         name = "test"
@@ -279,6 +347,7 @@ def test_bulk_evaluation_processes_every_requested_offer(tmp_path):
                     self.active -= 1
 
     store = Store(tmp_path / "db.sqlite3")
+    store.set_setting("candidate_profile", SAMPLE_CANDIDATE_PROFILE)
     store.upsert_offer(OFFER)
     store.upsert_offer({
         **OFFER,
@@ -383,6 +452,7 @@ def test_offer_api_remains_responsive_during_ai_evaluation(tmp_path):
             return evaluation()
 
     store = Store(tmp_path / "db.sqlite3")
+    store.set_setting("candidate_profile", SAMPLE_CANDIDATE_PROFILE)
     store.upsert_offer(OFFER)
     service = JobService(store, evaluator=WaitingEvaluator())
     client = create_app(service=service).test_client()

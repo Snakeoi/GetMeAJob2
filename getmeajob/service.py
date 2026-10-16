@@ -8,9 +8,12 @@ from typing import Any, Callable
 
 from .evaluation import CodexEvaluator
 from .remote import assess_remote_requirement, remote_rejection_result
+from .sources.bulldogjob import BulldogjobSource, JOB_PATH as BULLDOGJOB_PATH
+from .sources.nofluffjobs import NoFluffJobsSource, JOB_PATH
 from .sources.justjoin import JustJoinSource, parse_job_page as parse_justjoin_page
 from .sources.pracuj import PracujSource, parse_job_page as parse_pracuj_page
 from .sources.rocketjobs import RocketJobsSource, parse_job_page as parse_rocketjobs_page, prefilter
+from .sources.solidjobs import SolidJobsSource, JOB_PATH as SOLIDJOBS_PATH
 from .store import Store, stable_hash
 
 
@@ -80,7 +83,10 @@ class JobService:
         evaluation_workers: int = 2,
     ):
         self.store = store
-        self.sources = [source] if source is not None else [RocketJobsSource(), JustJoinSource(), PracujSource()]
+        self.sources = [source] if source is not None else [
+            RocketJobsSource(), JustJoinSource(), PracujSource(), NoFluffJobsSource(),
+            BulldogjobSource(), SolidJobsSource(),
+        ]
         self.source = self.sources[0]
         self.evaluator = evaluator or CodexEvaluator()
         self.evaluation_workers = max(1, min(evaluation_workers, 4))
@@ -105,6 +111,8 @@ class JobService:
 
     def sync(self, report: Callable[..., None], source_ids: list[str] | None = None) -> dict[str, Any]:
         profile = self.store.get_setting("search_profile")
+        if not profile.get("roles"):
+            raise ValueError("Najpierw ustaw stanowiska w Ustawieniach")
         candidate = self.store.get_setting("candidate_profile")
         counts = {"seen": 0, "matched": 0, "new": 0, "changed": 0, "unchanged": 0, "skipped": 0}
         source_reports: list[dict[str, Any]] = []
@@ -132,7 +140,10 @@ class JobService:
                     report(f"{name}: {current}/{total}", current, total)
 
                 kwargs: dict[str, Any] = {"progress": progress}
-                if isinstance(source, PracujSource):
+                if isinstance(source, (RocketJobsSource, JustJoinSource, PracujSource, NoFluffJobsSource,
+                                       BulldogjobSource, SolidJobsSource)):
+                    kwargs["profile"] = profile
+                if isinstance(source, (PracujSource, NoFluffJobsSource, BulldogjobSource, SolidJobsSource)):
                     kwargs["diagnostics"] = source_counts["discovery"]
                 for offer in source.offers(**kwargs):
                     counts["seen"] += 1
@@ -173,16 +184,23 @@ class JobService:
         elif is_pracuj and parsed.path.startswith("/praca/") and ",oferta," in unquote(parsed.path):
             source = next((item for item in self.sources if isinstance(item, PracujSource)), PracujSource())
             parser = parse_pracuj_page
+        elif parsed.netloc == "nofluffjobs.com" and JOB_PATH.fullmatch(parsed.path):
+            source = next((item for item in self.sources if isinstance(item, NoFluffJobsSource)), NoFluffJobsSource())
+        elif parsed.netloc in {"bulldogjob.pl", "bulldogjob.com"} and BULLDOGJOB_PATH.fullmatch(parsed.path):
+            source = next((item for item in self.sources if isinstance(item, BulldogjobSource)), BulldogjobSource())
+        elif parsed.netloc == "solid.jobs" and SOLIDJOBS_PATH.fullmatch(parsed.path):
+            source = next((item for item in self.sources if isinstance(item, SolidJobsSource)), SolidJobsSource())
         else:
-            raise ValueError("Obsługiwane są linki ofert RocketJobs, JustJoinIT i Pracuj.pl")
-        offer = source.fetch_offer(url) if isinstance(source, PracujSource) else parser(url, source._get(url))
+            raise ValueError("Obsługiwane są linki ofert RocketJobs, JustJoinIT, Pracuj.pl, No Fluff Jobs, Bulldogjob i SOLID.Jobs")
+        offer = source.fetch_offer(url) if isinstance(source, (PracujSource, NoFluffJobsSource,
+                                                            BulldogjobSource, SolidJobsSource)) else parser(url, source._get(url))
         _, reason = prefilter(
             offer,
             self.store.get_setting("search_profile"),
             self.store.get_setting("candidate_profile"),
         )
         self.store.upsert_offer(offer)
-        return self.store.get_offer(self._id_for_url(url)), reason
+        return self.store.get_offer(self._id_for_url(offer["url"])), reason
 
     @staticmethod
     def _id_for_url(url: str) -> str:
@@ -198,10 +216,16 @@ class JobService:
         total = len(ids)
         offers: list[tuple[int, str, dict[str, Any]]] = []
         errors_by_index: dict[int, dict[str, str]] = {}
+        submitted_ids = {
+            application["offer_id"] for application in self.store.applications()
+            if application["status"] == "submitted"
+        }
         for index, offer_id in enumerate(ids):
             offer = self.store.get_offer(offer_id)
             if not offer:
                 errors_by_index[index] = {"id": offer_id, "error": "Offer not found"}
+            elif offer["decision"] == "rejected" or offer_id in submitted_ids:
+                errors_by_index[index] = {"id": offer_id, "error": "Oferta odrzucona lub wysłana nie podlega ponownej ocenie"}
             else:
                 offers.append((index, offer_id, offer))
 

@@ -14,6 +14,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from ..remote import assess_remote_requirement
+from ..search_profile import slug_matches_roles, title_matches_roles
 
 
 SITEMAP_URL = "https://rocketjobs.pl/sitemaps/active-jobs.xml"
@@ -129,20 +130,14 @@ def prefilter(
 ) -> tuple[bool, str]:
     title = offer["title"]
     description = offer["description"]
-    title_lower = title.lower()
-    specialized_other_role = bool(re.search(r"\b(?:qa|quality assurance|test|testing|automation|slam|data engineer|devops)\b", title, re.I))
-    python_role = "python" in title_lower and bool(DEVELOPER.search(title)) and not specialized_other_role
-    python_backend = "backend" in title_lower and "python" in description.lower() and not specialized_other_role
-    vue_fullstack = bool(FULLSTACK.search(title)) and bool(re.search(r"\bvue(?:\.js)?\b", description, re.I))
-    role_matches = vue_fullstack if FULLSTACK.search(title) else python_role or python_backend
-    if not role_matches:
-        return False, "Stanowisko nie odpowiada Python Developer ani Full Stack z Vue"
+    if not title_matches_roles(title, description, profile.get("roles", [])):
+        return False, "Stanowisko nie odpowiada wybranym rolom"
     remote_ok, remote_reason = assess_remote_requirement(offer, profile, candidate)
     if not remote_ok:
         return False, remote_reason
     contracts = offer.get("contract_types") or []
     if contracts and not set(contracts).intersection(profile.get("contract_types", [])):
-        return False, "Brak umowy UoP lub B2B"
+        return False, "Oferta nie ma wybranej formy zatrudnienia"
     lowered = (title + " " + description).lower()
     for term in profile.get("excluded_terms", []):
         if term and term.lower() in lowered:
@@ -153,9 +148,9 @@ def prefilter(
     if salary.get("currency") == "PLN" and salary.get("unit") == "month" and maximum is not None and len(contracts) == 1:
         basis = salary.get("basis", "")
         if basis.startswith("uop_") and maximum < profile["minimum_uop_gross_pln_month"]:
-            return False, "Maksymalne wynagrodzenie UoP poniżej 20 000 PLN brutto/mies."
+            return False, f"Maksymalne wynagrodzenie UoP poniżej {profile['minimum_uop_gross_pln_month']:g} PLN brutto/mies."
         if basis.startswith("b2b_") and maximum < profile["minimum_b2b_net_pln_month"]:
-            return False, "Maksymalne wynagrodzenie B2B poniżej 20 000 PLN netto/mies."
+            return False, f"Maksymalne wynagrodzenie B2B poniżej {profile['minimum_b2b_net_pln_month']:g} PLN netto/mies."
     elif not profile.get("include_unknown_salary", True):
         return False, "Brak potwierdzonego wynagrodzenia miesięcznego"
     return True, ""
@@ -185,7 +180,7 @@ class RocketJobsSource:
         parser.parse(self._get(ROBOTS_URL).splitlines())
         return parser
 
-    def discover(self) -> list[tuple[str, str | None]]:
+    def discover(self, profile: dict[str, Any] | None = None) -> list[tuple[str, str | None]]:
         robots = self._robots()
         pending = [SITEMAP_URL]
         found: list[tuple[str, str | None]] = []
@@ -201,14 +196,14 @@ class RocketJobsSource:
                 parsed = urlparse(url)
                 if parsed.netloc != "rocketjobs.pl" or not parsed.path.startswith("/oferta-pracy/"):
                     continue
-                if not TITLE_HINT.search(parsed.path):
+                if not (slug_matches_roles(parsed.path, profile["roles"]) if profile else TITLE_HINT.search(parsed.path)):
                     continue
                 if robots.can_fetch(USER_AGENT, url):
                     found.append((url, lastmod))
         return found
 
-    def offers(self, progress: Callable[[int, int], None] | None = None) -> Iterator[dict[str, Any]]:
-        urls = self.discover()
+    def offers(self, progress: Callable[[int, int], None] | None = None, profile: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
+        urls = self.discover(profile)
         for index, (url, lastmod) in enumerate(urls, 1):
             try:
                 yield parse_job_page(url, self._get(url), lastmod)

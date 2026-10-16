@@ -13,6 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from .rocketjobs import TITLE_HINT, _text
+from ..search_profile import search_terms, slug_matches_roles
 
 
 BASE_URL = "https://www.pracuj.pl"
@@ -260,10 +261,11 @@ class PracujSource:
         parser.parse(self._direct_get(ROBOTS_URL).splitlines())
         return parser
 
-    def discover(self, diagnostics: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def discover(self, diagnostics: dict[str, Any] | None = None, profile: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         stats = diagnostics if diagnostics is not None else {}
+        terms = search_terms(profile["roles"]) if profile else list(SEARCH_TERMS)
         stats.update({
-            "search_terms": list(SEARCH_TERMS), "pages_checked": 0,
+            "search_terms": terms, "pages_checked": 0,
             "listing_rows": 0, "title_filtered": 0, "duplicates": 0,
             "candidates": 0, "search_limit_reached": False,
             "candidates_by_term": {}, "term_limits_reached": [],
@@ -273,7 +275,7 @@ class PracujSource:
         })
         robots = self._robots()
         found: dict[str, dict[str, Any]] = {}
-        for term in SEARCH_TERMS:
+        for term in terms:
             term_urls: set[str] = set()
             term_candidates = 0
             page_limit_reached = False
@@ -292,7 +294,7 @@ class PracujSource:
                     if offer["url"] not in term_urls:
                         term_urls.add(offer["url"])
                         new_on_page += 1
-                    if not TITLE_HINT.search(offer["title"]):
+                    if not (slug_matches_roles(offer["title"], profile["roles"]) if profile else TITLE_HINT.search(offer["title"])):
                         stats["title_filtered"] += 1
                         continue
                     if offer["url"] in found:
@@ -321,9 +323,10 @@ class PracujSource:
     def offers(
         self, progress: Callable[[int, int], None] | None = None,
         diagnostics: dict[str, Any] | None = None,
+        profile: dict[str, Any] | None = None,
     ) -> Iterator[dict[str, Any]]:
         stats = diagnostics if diagnostics is not None else {}
-        candidates = self.discover(stats)
+        candidates = self.discover(stats, profile)
         stats.update({"details_ok": 0, "details_failed": 0, "detail_errors": {}})
         for index, candidate in enumerate(candidates, 1):
             try:

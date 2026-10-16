@@ -16,6 +16,11 @@ const searchProfile = ref(null)
 const decisionProfile = ref(null)
 const candidateProfile = ref(null)
 const resumeName = ref(null)
+const resumeNameKnown = ref(false)
+const resumeFactsStatus = ref('missing')
+const showResumePreview = ref(false)
+const resumePreviewLoading = ref(false)
+const resumePreviewUrl = ref(null)
 const operation = ref({ status: 'idle' })
 const lastSyncReport = ref(null)
 const availableSources = ref([])
@@ -30,6 +35,7 @@ const bulkSaving = ref(false)
 const pendingSubmission = ref(null)
 const submissionConfirmation = ref('')
 const submissionSaving = ref(false)
+const unsubmissionSaving = ref(false)
 const showDatabaseReset = ref(false)
 const databaseResetConfirmation = ref('')
 const databaseResetSaving = ref(false)
@@ -37,7 +43,11 @@ const notice = ref('')
 const error = ref('')
 const saving = ref(false)
 const excludedText = ref('')
+const rolesText = ref('')
+const workLocationsText = ref('')
 const candidateFactsText = ref('')
+const extractedFacts = ref(null)
+const extractedResumeHash = ref(null)
 const clock = ref(Date.now())
 let poller = null
 let clockTimer = null
@@ -54,15 +64,25 @@ const nav = [
 ]
 
 const selected = computed(() => visibleOffers.value.find((item) => item.id === selectedId.value) || null)
+function emphasizedParts(text) {
+  // Render text nodes only: model output must never become HTML.
+  const pattern = /(\*\*[^*]+\*\*|\b(?:Python|Flask|Django|REST|FastAPI|AsyncIO|Vue(?:\.js)?|Angular(?:\.js)?|JavaScript|TypeScript|SQLAlchemy|PostgreSQL|MariaDB|SQL|Docker|Kubernetes|AWS|Azure|GCP|Kafka|RabbitMQ|Redis|GitLab|GitHub|Git|PHP|Perl|ETL|CI\/CD|code review|B2\/C1|B2B|UoP)\b)/gi
+  return String(text || '').split(pattern).map((part, index) => ({
+    text: part.startsWith('**') && part.endsWith('**') ? part.slice(2, -2) : part,
+    bold: index % 2 === 1,
+  }))
+}
+const positiveSummary = computed(() => (selected.value?.evaluation?.matches || [])
+  .map((match) => match.summary || match.explanation).filter(Boolean))
+const negativeSummary = computed(() => selected.value?.evaluation?.gaps || [])
 const selectedApplication = computed(() => applications.value.find((item) => item.offer_id === selectedId.value) || null)
 const pendingApprovedIds = computed(() => new Set(applications.value.filter((item) => item.status === 'approved').map((item) => item.offer_id)))
 const submittedOfferIds = computed(() => new Set(applications.value.filter((item) => item.status === 'submitted').map((item) => item.offer_id)))
-const submittedApplications = computed(() => applications.value.filter((item) => item.status === 'submitted'))
 const unevaluatedOfferIds = computed(() => offers.value
   .filter((item) => item.decision === 'none' && !item.evaluation)
   .map((item) => item.id))
 const staleOfferIds = computed(() => offers.value
-  .filter((item) => item.evaluation && item.evaluation_stale && !submittedOfferIds.value.has(item.id))
+  .filter((item) => item.evaluation && item.evaluation_stale && item.decision !== 'rejected' && !submittedOfferIds.value.has(item.id))
   .map((item) => item.id))
 const counters = computed(() => ({
   all: offers.value.length,
@@ -87,6 +107,7 @@ const visibleOffers = computed(() => {
   if (section.value === 'review') result = result.filter((item) => item.decision === 'none' && item.evaluation)
   if (section.value === 'approved') result = result.filter((item) => pendingApprovedIds.value.has(item.id))
   if (section.value === 'rejected') result = result.filter((item) => item.decision === 'rejected')
+  if (section.value === 'submitted') result = result.filter((item) => submittedOfferIds.value.has(item.id))
   const query = search.value.trim().toLowerCase()
   if (query) result = result.filter((item) => `${item.title} ${item.company} ${item.description}`.toLowerCase().includes(query))
   return result
@@ -101,6 +122,7 @@ const emptyListMessage = computed(() => {
   if (section.value === 'review') return 'Brak ofert do sprawdzenia.'
   if (section.value === 'approved') return 'Brak zatwierdzonych ofert.'
   if (section.value === 'rejected') return 'Brak odrzuconych ofert.'
+  if (section.value === 'submitted') return 'Brak wysłanych aplikacji.'
   return 'Brak ofert.'
 })
 const operationElapsed = computed(() => {
@@ -124,21 +146,34 @@ async function boot() {
   try {
     const data = await api('/api/bootstrap')
     token.value = data.token
-    searchProfile.value = data.search_profile
+    setSearchProfile(data.search_profile, data.candidate_profile)
     decisionProfile.value = data.decision_profile
     candidateProfile.value = data.candidate_profile
     resumeName.value = data.resume_name
+    resumeNameKnown.value = data.resume_name_known
+    resumeFactsStatus.value = data.resume_facts_status
     operation.value = data.operation
     lastSyncReport.value = data.last_sync_report
     availableSources.value = data.sources || []
     selectedSyncSourceIds.value = availableSources.value.map((source) => source.id)
-    excludedText.value = (data.search_profile.excluded_terms || []).join(', ')
     candidateFactsText.value = data.candidate_profile.facts.map((fact) => fact.text).join('\n')
     await refresh()
   } catch (exc) {
     error.value = exc.message
   }
   poller = setInterval(pollOperation, 2000)
+}
+
+function setSearchProfile(profile, candidate) {
+  const locations = (candidate?.facts || []).filter((fact) => fact.kind === 'location' && fact.city).map((fact) => fact.city)
+  searchProfile.value = profile.work_modes ? profile : {
+    ...profile,
+    work_modes: ['remote', 'hybrid', 'onsite'],
+    work_locations: profile.remote_only ? locations : [],
+  }
+  rolesText.value = (profile.roles || []).join('\n')
+  workLocationsText.value = (searchProfile.value.work_locations || []).join(', ')
+  excludedText.value = (profile.excluded_terms || []).join(', ')
 }
 
 async function refresh() {
@@ -158,7 +193,14 @@ async function pollOperation() {
     if (progressChanged || next.status !== 'running') await refresh()
     if (next.status === 'done') {
       if (next.kind === 'sync') lastSyncReport.value = next.result
-      notice.value = next.kind === 'sync' ? `Pobieranie zakończone: ${next.result?.new ?? 0} nowych ofert.` : 'Ocena ofert zakończona. Wyniki są w „Do sprawdzenia”.'
+      if (next.kind === 'resume-facts') {
+        extractedFacts.value = next.result.facts
+        extractedResumeHash.value = next.result.resume_hash
+        candidateFactsText.value = extractedFacts.value.map((fact) => fact.text).join('\n')
+        notice.value = 'Fakty z CV są gotowe. Sprawdź je i kliknij „Zapisz”.'
+      } else {
+        notice.value = next.kind === 'sync' ? `Pobieranie zakończone: ${next.result?.new ?? 0} nowych ofert.` : 'Ocena ofert zakończona. Wyniki są w „Do sprawdzenia”.'
+      }
       if (next.result?.errors?.length) error.value = `${next.result.errors.length} ocen nie powiodło się. ${next.result.errors[0].error}`
     } else if (next.status === 'error') {
       error.value = next.message
@@ -271,21 +313,28 @@ async function saveSettings() {
     }
     decisionProfile.value = await api('/api/decision-profile', { method: 'PUT', body: JSON.stringify({ approve_min_score: approve, reject_below_score: reject }) })
     const profile = { ...searchProfile.value, excluded_terms: excludedText.value.split(',').map((x) => x.trim()).filter(Boolean) }
+    profile.roles = rolesText.value.split('\n').map((x) => x.trim()).filter(Boolean)
+    profile.work_locations = workLocationsText.value.split(',').map((x) => x.trim()).filter(Boolean)
     profile.minimum_uop_gross_pln_month = Number(profile.minimum_uop_gross_pln_month)
     profile.minimum_b2b_net_pln_month = Number(profile.minimum_b2b_net_pln_month)
-    searchProfile.value = await api('/api/search-profile', { method: 'PUT', body: JSON.stringify(profile) })
+    setSearchProfile(await api('/api/search-profile', { method: 'PUT', body: JSON.stringify(profile) }), candidateProfile.value)
     const factLines = candidateFactsText.value.split('\n').map((x) => x.trim()).filter(Boolean)
     candidateProfile.value = await api('/api/candidate-profile', {
       method: 'PUT',
       body: JSON.stringify({
         ...candidateProfile.value,
-        facts: factLines.map((text, index) => ({
-          ...(candidateProfile.value.facts[index] || {}),
-          id: candidateProfile.value.facts[index]?.id || `manual-${index + 1}`,
-          text,
-        })),
+        ...(extractedResumeHash.value ? { extracted_resume_hash: extractedResumeHash.value } : {}),
+        facts: factLines.map((text, index) => {
+          const draft = extractedFacts.value?.[index]
+          const previous = candidateProfile.value.facts[index]
+          const source = draft?.text === text ? draft : !extractedFacts.value && previous?.text === text ? previous : null
+          return source ? { ...source } : { id: `manual-${index + 1}`, text }
+        }),
       }),
     })
+    extractedFacts.value = null
+    if (extractedResumeHash.value) resumeFactsStatus.value = 'ready'
+    extractedResumeHash.value = null
     await refresh()
     notice.value = 'Ustawienia zapisane. Po zmianie profilu lub CV poprzednie oceny warto odświeżyć.'
   } catch (exc) { error.value = exc.message }
@@ -299,8 +348,50 @@ async function uploadResume(event) {
     const body = new FormData()
     body.append('file', file)
     const result = await api('/api/resume', { method: 'POST', body })
+    closeResumePreview()
     resumeName.value = result.resume_name
-    notice.value = 'CV zapisane lokalnie.'
+    resumeNameKnown.value = result.resume_name_known
+    resumeFactsStatus.value = result.resume_facts_status
+    extractedFacts.value = null
+    extractedResumeHash.value = null
+    notice.value = resumeFactsStatus.value === 'ready'
+      ? 'Wgrano to samo CV. Fakty są już zapisane dla tego pliku.'
+      : 'CV zapisane lokalnie. Wyciągnij z niego nowe fakty.'
+  } catch (exc) { error.value = exc.message }
+  finally { event.target.value = '' }
+}
+
+function closeResumePreview() {
+  showResumePreview.value = false
+  if (resumePreviewUrl.value) URL.revokeObjectURL(resumePreviewUrl.value)
+  resumePreviewUrl.value = null
+}
+
+async function openResumePreview() {
+  if (!resumeName.value || resumePreviewLoading.value) return
+  try {
+    error.value = ''
+    resumePreviewLoading.value = true
+    showResumePreview.value = true
+    const response = await fetch('/api/resume/preview', { headers: { 'X-Local-Token': token.value }, cache: 'no-store' })
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(data.error || `Błąd ${response.status}`)
+    }
+    const blob = await response.blob()
+    if (showResumePreview.value) resumePreviewUrl.value = URL.createObjectURL(blob)
+  } catch (exc) {
+    closeResumePreview()
+    error.value = exc.message
+  } finally { resumePreviewLoading.value = false }
+}
+
+async function extractFacts() {
+  try {
+    error.value = ''
+    await api('/api/resume/extract-facts', { method: 'POST' })
+    const now = new Date().toISOString()
+    operation.value = { kind: 'resume-facts', status: 'running', message: 'Odczytuję CV…', current: 0, total: 0, started_at: now, updated_at: now }
   } catch (exc) { error.value = exc.message }
 }
 
@@ -321,6 +412,18 @@ async function confirmSubmission() {
     notice.value = 'Aplikacja została przeniesiona do „Wysłanych”.'
   } catch (exc) { error.value = exc.message }
   finally { submissionSaving.value = false }
+}
+
+async function markNotSubmitted(application) {
+  if (unsubmissionSaving.value) return
+  try {
+    unsubmissionSaving.value = true
+    error.value = ''
+    await api(`/api/applications/${application.offer_id}/not-submitted`, { method: 'POST' })
+    await refresh()
+    notice.value = 'Aplikacja została przywrócona do „Zatwierdzonych”.'
+  } catch (exc) { error.value = exc.message }
+  finally { unsubmissionSaving.value = false }
 }
 
 async function resetDatabase() {
@@ -344,12 +447,13 @@ async function resetDatabase() {
 
 async function bootAfterReset() {
   const data = await api('/api/bootstrap')
-  searchProfile.value = data.search_profile
+  setSearchProfile(data.search_profile, data.candidate_profile)
   decisionProfile.value = data.decision_profile
   candidateProfile.value = data.candidate_profile
   resumeName.value = data.resume_name
+  resumeNameKnown.value = data.resume_name_known
+  resumeFactsStatus.value = data.resume_facts_status
   lastSyncReport.value = data.last_sync_report
-  excludedText.value = (data.search_profile.excluded_terms || []).join(', ')
   candidateFactsText.value = data.candidate_profile.facts.map((fact) => fact.text).join('\n')
   await refresh()
 }
@@ -392,6 +496,9 @@ function sourceLabel(source) {
     rocketjobs: 'RocketJobs',
     justjoin: 'JustJoinIT',
     pracuj: 'Pracuj.pl',
+    nofluffjobs: 'No Fluff Jobs',
+    bulldogjob: 'Bulldogjob',
+    solidjobs: 'SOLID.Jobs',
   }[source] || source || 'Nieznane źródło'
 }
 
@@ -438,6 +545,7 @@ onMounted(() => {
 onUnmounted(() => {
   clearInterval(poller)
   clearInterval(clockTimer)
+  closeResumePreview()
 })
 </script>
 
@@ -466,6 +574,7 @@ onUnmounted(() => {
 
       <template v-if="section === 'overview'">
         <div class="page-intro minimal-intro"><h1>Oferty</h1><div class="overview-heading-actions"><span class="count-line">{{ counters.all }} zapisanych</span><button v-if="counters.stale" class="outline-button" @click="startStaleEvaluation" :disabled="operation.status === 'running'"><RotateCw :size="16" /> Oceń ponownie nieaktualne <b>{{ counters.stale }}</b></button><button v-if="counters.unrated" class="outline-button" @click="startUnevaluatedEvaluation" :disabled="operation.status === 'running'"><Sparkles :size="16" /> Oceń nieocenione oferty <b>{{ counters.unrated }}</b></button></div></div>
+        <div v-if="searchProfile && !searchProfile.roles.length" class="setup-banner"><strong>Ustaw, jakiej pracy szukasz</strong><span>Dodaj stanowiska, tryb i lokalizacje pracy, formę zatrudnienia oraz oczekiwane wynagrodzenie.</span><button class="primary-button" @click="pickSection('settings')">Otwórz ustawienia</button></div>
         <div class="stats-grid">
           <div class="stat-card"><span>Nieocenione</span><strong>{{ counters.unrated }}</strong></div>
           <div class="stat-card"><span>Rekomendowane</span><strong>{{ counters.recommended }}</strong></div>
@@ -478,6 +587,10 @@ onUnmounted(() => {
           <div v-for="source in lastSyncReport.sources" :key="source.id" class="sync-report-source">
             <strong>{{ source.label }}</strong>
             <span>{{ source.seen }} pobranych szczegółów · {{ source.matched }} pasujących · {{ source.new }} nowych · {{ source.skipped }} odrzuconych</span>
+            <template v-if="source.id === 'nofluffjobs' && source.discovery?.pages_fetched != null">
+              <small>{{ source.discovery.pages_fetched }} stron wyników · {{ source.discovery.listing_entries }} pozycji · {{ source.discovery.candidates }} kandydatów · {{ source.discovery.detail_errors }} błędów szczegółów</small>
+              <small>Limit na stanowisko: {{ source.discovery.max_pages_per_term }} strony / {{ source.discovery.max_candidates_per_term }} kandydatów</small>
+            </template>
             <template v-if="source.discovery?.search_terms">
               <small>{{ source.discovery.pages_checked }} stron wyników · {{ source.discovery.listing_rows }} pozycji na listach · {{ source.discovery.title_filtered }} odrzuconych po tytule · {{ source.discovery.duplicates }} duplikatów · {{ source.discovery.candidates }} kandydatów · {{ source.discovery.details_failed ?? 0 }} błędów szczegółów</small>
               <small>Frazy: <span v-for="(count, term) in source.discovery.candidates_by_term" :key="term">{{ term }} ({{ count }}) · </span></small>
@@ -492,16 +605,33 @@ onUnmounted(() => {
         <div v-else class="overview-list"><button v-for="offer in offers.slice(0, 5)" :key="offer.id" class="overview-row" @click="openOffer(offer)"><span class="company-avatar">{{ offer.company?.slice(0, 1) || '?' }}</span><span class="overview-info"><strong>{{ offer.title }}</strong><small>{{ offer.company }} · {{ offer.remote_mode === 'remote' ? 'Zdalnie' : offer.location }} · {{ sourceLabel(offer.source) }}</small></span><span :class="['recommendation', overviewClass(offer)]">{{ overviewLabel(offer) }}</span><ChevronRight :size="18" /></button></div>
       </template>
 
-      <template v-else-if="['offers', 'review', 'approved', 'rejected'].includes(section)">
-        <div class="page-intro compact minimal-intro"><h1>{{ activeTitle }}</h1><button v-if="section === 'offers' && counters.unrated" class="outline-button" @click="startUnevaluatedEvaluation" :disabled="operation.status === 'running'"><Sparkles :size="16" /> Oceń nieocenione oferty <b>{{ counters.unrated }}</b></button><button v-if="['review', 'approved', 'rejected'].includes(section) && counters.stale" class="outline-button" @click="startStaleEvaluation" :disabled="operation.status === 'running'"><RotateCw :size="16" /> Oceń ponownie nieaktualne <b>{{ counters.stale }}</b></button></div>
-        <div v-if="section === 'review' && counters.review > counters.stale && decisionProfile" class="bulk-actions"><button class="primary-button" :disabled="!bulkEligible.approved" @click="bulkDecide('approved')"><Check :size="15" /> Zatwierdź ≥{{ decisionProfile.approve_min_score }}/100 <span v-if="bulkEligible.approved">({{ bulkEligible.approved }})</span></button><button class="soft-button danger" :disabled="!bulkEligible.rejected" @click="bulkDecide('rejected')"><ThumbsDown :size="15" /> Odrzuć &lt;{{ decisionProfile.reject_below_score }}/100 <span v-if="bulkEligible.rejected">({{ bulkEligible.rejected }})</span></button><span class="bulk-hint">Bez decyzji i z aktualną oceną · <button class="text-button" @click="pickSection('settings')">Zmień progi</button></span></div>
+      <template v-else-if="['offers', 'review', 'approved', 'rejected', 'submitted'].includes(section)">
+        <div class="page-intro compact minimal-intro"><h1>{{ activeTitle }}</h1><button v-if="section === 'offers' && counters.unrated" class="outline-button" @click="startUnevaluatedEvaluation" :disabled="operation.status === 'running'"><Sparkles :size="16" /> Oceń nieocenione oferty <b>{{ counters.unrated }}</b></button><button v-if="['review', 'approved'].includes(section) && counters.stale" class="outline-button" @click="startStaleEvaluation" :disabled="operation.status === 'running'"><RotateCw :size="16" /> Oceń ponownie nieaktualne <b>{{ counters.stale }}</b></button></div>
+        <div v-if="section === 'review' && decisionProfile" class="bulk-actions"><button class="primary-button" :disabled="!bulkEligible.approved" @click="bulkDecide('approved')"><Check :size="15" /> Zatwierdź ≥{{ decisionProfile.approve_min_score }}/100 <span v-if="bulkEligible.approved">({{ bulkEligible.approved }})</span></button><button class="soft-button danger" :disabled="!bulkEligible.rejected" @click="bulkDecide('rejected')"><ThumbsDown :size="15" /> Odrzuć &lt;{{ decisionProfile.reject_below_score }}/100 <span v-if="bulkEligible.rejected">({{ bulkEligible.rejected }})</span></button><span class="bulk-hint">Bez decyzji i z aktualną oceną · <button class="text-button" @click="pickSection('settings')">Zmień progi</button></span></div>
         <div class="list-toolbar"><div class="search-box"><Search :size="17" /><input v-model="search" placeholder="Szukaj stanowiska lub firmy…" /></div><span class="list-count">{{ visibleOffers.length }} {{ offerCountNoun(visibleOffers.length) }}</span></div>
         <div :class="['offers-layout', { 'empty-state': !visibleOffers.length }]">
-          <div class="offer-list"><div v-if="!visibleOffers.length" class="list-empty">{{ emptyListMessage }}</div><button v-for="offer in visibleOffers" :key="offer.id" :class="['offer-card', { selected: selectedId === offer.id }]" @click="selectedId = offer.id"><div class="offer-card-head"><span class="company-avatar">{{ offer.company?.slice(0, 1) || '?' }}</span><span class="source-badge">{{ sourceLabel(offer.source) }}</span><span :class="['recommendation', offerCardClass(offer)]">{{ offerCardLabel(offer) }}</span><span v-if="offer.evaluation" class="offer-score">{{ offer.evaluation.score }}/100</span></div><strong>{{ offer.title }}</strong><span class="company-name">{{ offer.company }}</span><div class="offer-meta"><span><MapPin :size="14" /> {{ offer.remote_mode === 'remote' ? 'Zdalnie' : offer.remote_mode === 'hybrid' ? 'Hybrydowo' : offer.location || 'Nieznane' }}</span><span><Wallet :size="14" /> {{ salaryText(offer.salary) }}</span></div><div class="offer-card-bottom"><span>{{ offer.contract_types.join(' / ') || 'Umowa nieznana' }}</span><span v-if="submittedOfferIds.has(offer.id)" class="approved-text"><Check :size="13" /> Wysłano</span><span v-else-if="pendingApprovedIds.has(offer.id)" class="approved-text"><Check :size="13" /> Zatwierdzona</span><span v-else-if="offer.decision === 'rejected' && offer.evaluation_stale" class="stale-text">Ocena nieaktualna</span></div></button></div>
+          <div class="offer-list"><div v-if="!visibleOffers.length" class="list-empty">{{ emptyListMessage }}</div><button v-for="offer in visibleOffers" :key="offer.id" :class="['offer-card', { selected: selectedId === offer.id }]" @click="selectedId = offer.id"><div class="offer-card-head"><span class="company-avatar">{{ offer.company?.slice(0, 1) || '?' }}</span><span class="source-badge">{{ sourceLabel(offer.source) }}</span><span :class="['recommendation', offerCardClass(offer)]">{{ offerCardLabel(offer) }}</span><span v-if="offer.evaluation" class="offer-score">{{ offer.evaluation.score }}/100</span></div><strong>{{ offer.title }}</strong><span class="company-name">{{ offer.company }}</span><div class="offer-meta"><span><MapPin :size="14" /> {{ offer.remote_mode === 'remote' ? 'Zdalnie' : offer.remote_mode === 'hybrid' ? 'Hybrydowo' : offer.location || 'Nieznane' }}</span><span><Wallet :size="14" /> {{ salaryText(offer.salary) }}</span></div><div class="offer-card-bottom"><span>{{ offer.contract_types.join(' / ') || 'Umowa nieznana' }}</span><span v-if="submittedOfferIds.has(offer.id)" class="approved-text"><Check :size="13" /> Wysłano</span><span v-else-if="pendingApprovedIds.has(offer.id)" class="approved-text"><Check :size="13" /> Zatwierdzona</span></div></button></div>
           <div v-if="selected" class="detail-panel"><div class="detail-top"><div class="detail-company"><span class="company-avatar large">{{ selected.company?.slice(0, 1) || '?' }}</span><div><span>OFERTA PRACY · {{ sourceLabel(selected.source) }}</span><h2>{{ selected.title }}</h2><p>{{ selected.company }} · {{ selected.location || 'Lokalizacja nieznana' }}</p></div></div><a :href="selected.url" target="_blank" rel="noopener noreferrer" class="icon-button" :title="`Otwórz oryginalną ofertę w ${sourceLabel(selected.source)}`"><ExternalLink :size="18" /></a></div><div class="detail-badges"><span class="source-detail-badge">Źródło: {{ sourceLabel(selected.source) }}</span><span><MapPin :size="14" /> {{ selected.remote_mode === 'remote' ? 'W pełni zdalnie' : selected.remote_mode }}</span><span><BriefcaseBusiness :size="14" /> {{ selected.contract_types.join(' / ') || 'Nieznana umowa' }}</span><span><Wallet :size="14" /> {{ salaryText(selected.salary) }}</span></div>
-            <div class="detail-actions detail-actions-top"><button v-if="selected.evaluation && selectedApplication?.status !== 'submitted'" class="outline-button" :disabled="operation.status === 'running'" @click="startEvaluation([selected.id])"><RotateCw :size="15" /> Oceń ponownie</button><span class="actions-spacer"></span><span v-if="selectedApplication?.status === 'submitted'" class="submitted-label"><Check :size="15" /> Wysłano — decyzja jest zamknięta</span><template v-else-if="selected.decision === 'rejected'"><span class="rejected-label">Odrzucona</span><button class="outline-button" @click="decide('none')">Cofnij odrzucenie</button></template><template v-else><button class="soft-button danger" @click="decide('rejected')"><ThumbsDown :size="15" /> Odrzuć</button><button v-if="selected.decision === 'approved'" class="outline-button" @click="decide('none')">Cofnij zatwierdzenie</button><button v-if="selectedApplication?.status === 'approved'" class="primary-button" @click="markSubmitted(selectedApplication)"><BadgeCheck :size="16" /> Wysłane</button><button v-else class="primary-button" :disabled="!selected.evaluation || selected.evaluation_stale" @click="decide('approved')"><Check :size="16" /> Zatwierdź</button></template></div>
-            <div v-if="selected.evaluation_stale" class="stale-notice"><CircleAlert :size="16" /><span>Ocena nieaktualna. Oferta lub profil zmieniły się od czasu analizy. Oceń ponownie przed zatwierdzeniem.</span></div>
-            <div v-if="selected.evaluation" class="evaluation-block"><div class="evaluation-heading"><div><span class="eyebrow">OCENA DOPASOWANIA</span><h3 :class="recommendationClass(selected)">{{ recommendationLabel(selected) }}</h3></div><div class="score-ring">{{ selected.evaluation.score }}<small>/100</small></div></div><p class="rationale">{{ selected.evaluation.rationale }}</p><div v-if="selected.evaluation.requirements?.length" class="eval-section"><h4><Search :size="17" /> Faktyczne wymagania oferty</h4><ul><li v-for="requirement in selected.evaluation.requirements" :key="requirement">{{ requirement }}</li></ul></div><div v-if="selected.evaluation.matches?.length" class="eval-section"><h4><BadgeCheck :size="17" /> Dlaczego pasujesz</h4><div v-for="(match, index) in selected.evaluation.matches" :key="index" class="evidence"><strong>{{ match.requirement }}</strong><p>{{ match.explanation }}</p><small>Dowód z CV: {{ candidateProfile?.facts.find((fact) => fact.id === match.candidate_fact_id)?.text || match.candidate_fact_id }}</small></div></div><div v-if="selected.evaluation.gaps?.length" class="eval-section"><h4><CircleAlert :size="17" /> Luki i ryzyka</h4><ul><li v-for="gap in selected.evaluation.gaps" :key="gap">{{ gap }}</li></ul></div><div v-if="selected.evaluation.unknowns?.length" class="eval-section"><h4><Search :size="17" /> Co warto sprawdzić</h4><ul><li v-for="unknown in selected.evaluation.unknowns" :key="unknown">{{ unknown }}</li></ul></div></div>
+            <div class="detail-actions detail-actions-top"><button v-if="selected.evaluation && selected.decision !== 'rejected' && selectedApplication?.status !== 'submitted'" class="outline-button" :disabled="operation.status === 'running'" @click="startEvaluation([selected.id])"><RotateCw :size="15" /> Oceń ponownie</button><span class="actions-spacer"></span><button v-if="selectedApplication?.status === 'submitted'" class="outline-button" :disabled="unsubmissionSaving" @click="markNotSubmitted(selectedApplication)"><RotateCw :size="15" /> {{ unsubmissionSaving ? 'Zapisuję…' : 'Nie wysłane' }}</button><template v-else-if="selected.decision === 'rejected'"><span class="rejected-label">Odrzucona</span><button class="outline-button" @click="decide('none')">Cofnij odrzucenie</button></template><template v-else><button class="soft-button danger" @click="decide('rejected')"><ThumbsDown :size="15" /> Odrzuć</button><button v-if="selected.decision === 'approved'" class="outline-button" @click="decide('none')">Cofnij zatwierdzenie</button><button v-if="selectedApplication?.status === 'approved'" class="primary-button" @click="markSubmitted(selectedApplication)"><BadgeCheck :size="16" /> Wysłane</button><button v-else class="primary-button" :disabled="!selected.evaluation || selected.evaluation_stale" @click="decide('approved')"><Check :size="16" /> Zatwierdź</button></template></div>
+            <div v-if="selectedApplication?.status === 'submitted'" class="eval-section"><p>Wysłano: {{ new Date(selectedApplication.submitted_at).toLocaleDateString('pl-PL') }}</p><p v-if="selectedApplication.confirmation">{{ selectedApplication.confirmation }}</p></div>
+            <div v-if="selected.evaluation_stale && selected.decision !== 'rejected' && selectedApplication?.status !== 'submitted'" class="stale-notice"><CircleAlert :size="16" /><span>Ocena nieaktualna. Oferta lub profil zmieniły się od czasu analizy. Oceń ponownie przed zatwierdzeniem.</span></div>
+            <div v-if="selected.evaluation" class="evaluation-block"><div class="evaluation-heading"><div><span class="eyebrow">OCENA DOPASOWANIA</span><h3 :class="recommendationClass(selected)">{{ recommendationLabel(selected) }}</h3></div><div class="score-ring">{{ selected.evaluation.score }}<small>/100</small></div></div><div class="evaluation-summary" aria-label="Podsumowanie oceny">
+              <section class="summary-paragraph summary-positive" aria-label="Mocne strony">
+                <h4>Mocne strony</h4>
+                <ul v-if="positiveSummary.length" class="summary-points">
+                  <li v-for="(point, index) in positiveSummary" :key="index"><template v-for="(part, partIndex) in emphasizedParts(point)" :key="partIndex"><strong v-if="part.bold">{{ part.text }}</strong><template v-else>{{ part.text }}</template></template></li>
+                </ul>
+                <p v-else>Ocena nie wskazuje potwierdzonych mocnych stron dopasowania.</p>
+              </section>
+              <section class="summary-paragraph summary-negative" aria-label="Braki i wady">
+                <h4>Braki i wady</h4>
+                <ul v-if="negativeSummary.length" class="summary-points">
+                  <li v-for="(point, index) in negativeSummary" :key="index"><template v-for="(part, partIndex) in emphasizedParts(point)" :key="partIndex"><strong v-if="part.bold">{{ part.text }}</strong><template v-else>{{ part.text }}</template></template></li>
+                </ul>
+                <p v-else>Ocena nie wskazuje konkretnych braków ani wad.</p>
+              </section>
+              <p class="summary-paragraph summary-conclusion"><strong>Podsumowanie</strong>{{ selected.evaluation.rationale }}</p>
+            </div><div v-if="selected.evaluation.requirements?.length" class="eval-section"><h4><Search :size="17" /> Faktyczne wymagania oferty</h4><ul><li v-for="requirement in selected.evaluation.requirements" :key="requirement">{{ requirement }}</li></ul></div><div v-if="selected.evaluation.matches?.length" class="eval-section"><h4><BadgeCheck :size="17" /> Dlaczego pasujesz</h4><div v-for="(match, index) in selected.evaluation.matches" :key="index" class="evidence"><strong>{{ match.requirement }}</strong><p>{{ match.explanation }}</p><small>Dowód z CV: {{ candidateProfile?.facts.find((fact) => fact.id === match.candidate_fact_id)?.text || match.candidate_fact_id }}</small></div></div><div v-if="selected.evaluation.gaps?.length" class="eval-section"><h4><CircleAlert :size="17" /> Luki i ryzyka</h4><ul><li v-for="gap in selected.evaluation.gaps" :key="gap"><template v-for="(part, index) in emphasizedParts(gap)" :key="index"><strong v-if="part.bold">{{ part.text }}</strong><template v-else>{{ part.text }}</template></template></li></ul></div><div v-if="selected.evaluation.unknowns?.length" class="eval-section"><h4><Search :size="17" /> Co warto sprawdzić</h4><ul><li v-for="unknown in selected.evaluation.unknowns" :key="unknown">{{ unknown }}</li></ul></div></div>
             <div v-else class="unevaluated"><h3>Brak oceny</h3><button class="primary-button" :disabled="operation.status === 'running'" @click="startEvaluation([selected.id])"><Sparkles :size="16" /> Oceń ofertę</button></div>
             <details class="offer-description"><summary>Pełny opis oferty</summary><p>{{ selected.description }}</p></details>
           </div><div v-else-if="visibleOffers.length" class="detail-panel detail-empty">Wybierz ofertę z listy.</div>
@@ -509,27 +639,33 @@ onUnmounted(() => {
         <div v-if="section === 'approved' && counters.approved" class="codex-banner"><strong>Aplikowanie</strong><span>W Codex: „Zaaplikuj na zatwierdzone oferty z GetMeAJob”.</span></div>
       </template>
 
-      <template v-else-if="section === 'submitted'"><div class="page-intro compact minimal-intro"><h1>Wysłane</h1></div><div v-if="!submittedApplications.length" class="empty-card"><h3>Brak wysłanych aplikacji</h3></div><div v-else class="history-table submitted-table"><div class="table-header"><span>STANOWISKO</span><span>DATA WYSŁANIA</span><span>NOTATKA</span></div><div v-for="application in submittedApplications" :key="application.id" class="table-row"><div><strong>{{ offerForApplication(application)?.title || application.offer_id }}</strong><small>{{ offerForApplication(application)?.company }}</small></div><span>{{ new Date(application.submitted_at).toLocaleDateString('pl-PL') }}</span><small>{{ application.confirmation || '—' }}</small></div></div></template>
 
       <template v-else-if="section === 'settings' && searchProfile">
-        <div class="page-intro compact minimal-intro"><h1>Ustawienia</h1><button class="primary-button" :disabled="saving" @click="saveSettings"><Check :size="16" /> Zapisz</button></div>
+        <div class="page-intro compact minimal-intro"><h1>Ustawienia</h1><button class="primary-button" :disabled="saving || (operation.status === 'running' && operation.kind === 'resume-facts')" @click="saveSettings"><Check :size="16" /> Zapisz</button></div>
         <div class="settings-grid">
           <section class="settings-card">
             <div class="settings-card-header"><h2>Filtry ofert</h2></div>
-            <div class="field"><label>Role</label><input :value="searchProfile.roles.join(' · ')" disabled /></div>
+            <div class="field"><label>Stanowiska</label><textarea v-model="rolesText" rows="3" placeholder="Np. Python Developer&#10;Full Stack Developer z Vue"></textarea><small>Jedno stanowisko w wierszu. Od nich zaczyna się wyszukiwanie ofert.</small></div>
+            <div class="field"><label>Tryb pracy</label><div class="profile-choices"><label><input v-model="searchProfile.work_modes" type="checkbox" value="remote" /> Zdalnie</label><label><input v-model="searchProfile.work_modes" type="checkbox" value="hybrid" /> Hybrydowo</label><label><input v-model="searchProfile.work_modes" type="checkbox" value="onsite" /> Stacjonarnie</label></div></div>
+            <div class="field"><label>Lokalizacje pracy hybrydowej i stacjonarnej</label><input v-model="workLocationsText" placeholder="Np. Bydgoszcz, Toruń" /><small>Oddziel miasta przecinkami. Praca zdalna nie jest ograniczana lokalizacją.</small></div>
+            <div class="field"><label>Forma zatrudnienia</label><div class="profile-choices"><label><input v-model="searchProfile.contract_types" type="checkbox" value="UoP" /> Umowa o pracę</label><label><input v-model="searchProfile.contract_types" type="checkbox" value="B2B" /> B2B</label></div></div>
             <div class="two-fields">
-              <div class="field"><label>UoP brutto / mies. od</label><div class="input-suffix"><input v-model="searchProfile.minimum_uop_gross_pln_month" type="number" min="0" /><span>PLN</span></div></div>
-              <div class="field"><label>B2B netto / mies. od</label><div class="input-suffix"><input v-model="searchProfile.minimum_b2b_net_pln_month" type="number" min="0" /><span>PLN</span></div></div>
+              <div v-if="searchProfile.contract_types.includes('UoP')" class="field"><label>UoP brutto / mies. od</label><div class="input-suffix"><input v-model="searchProfile.minimum_uop_gross_pln_month" type="number" min="0" /><span>PLN</span></div></div>
+              <div v-if="searchProfile.contract_types.includes('B2B')" class="field"><label>B2B netto / mies. od</label><div class="input-suffix"><input v-model="searchProfile.minimum_b2b_net_pln_month" type="number" min="0" /><span>PLN</span></div></div>
             </div>
-            <label class="toggle-row"><span><strong>Tylko zdalnie</strong></span><input v-model="searchProfile.remote_only" type="checkbox" /></label>
+            <small class="profile-hint">Wpisz 0, jeśli nie chcesz ustawiać minimum wynagrodzenia.</small>
             <label class="toggle-row"><span><strong>Uwzględniaj oferty bez widełek</strong></span><input v-model="searchProfile.include_unknown_salary" type="checkbox" /></label>
             <div class="field"><label>Wykluczone frazy</label><input v-model="excludedText" placeholder="Oddziel przecinkami" /></div>
             <div v-if="decisionProfile" class="decision-thresholds"><h3>Decyzje zbiorcze</h3><div class="two-fields"><div class="field"><label>Zatwierdź od wyniku</label><div class="input-suffix"><input v-model="decisionProfile.approve_min_score" type="number" min="0" max="100" step="1" /><span>/100</span></div></div><div class="field"><label>Odrzuć poniżej wyniku</label><div class="input-suffix"><input v-model="decisionProfile.reject_below_score" type="number" min="0" max="100" step="1" /><span>/100</span></div></div></div><small>Zmiana progów nie zmienia wcześniejszych decyzji.</small></div>
           </section>
           <section class="settings-card">
             <div class="settings-card-header"><h2>CV i doświadczenie</h2></div>
-            <div class="resume-upload"><strong>{{ resumeName || 'Brak CV' }}</strong><label class="outline-button">{{ resumeName ? 'Zmień PDF' : 'Wybierz PDF' }}<input type="file" accept="application/pdf,.pdf" hidden @change="uploadResume" /></label></div>
-            <div class="field facts-field"><label>Fakty z CV</label><textarea v-model="candidateFactsText" rows="11"></textarea><small>Jeden fakt w wierszu. Po zmianie ocenę trzeba odświeżyć.</small></div>
+            <div class="resume-upload"><strong>{{ resumeName || 'Brak CV' }}</strong><div class="resume-actions"><button v-if="resumeName" class="outline-button" @click="openResumePreview"><ExternalLink :size="15" /> Podgląd CV</button><label class="outline-button">{{ resumeName ? 'Zmień PDF' : 'Wybierz PDF' }}<input type="file" accept="application/pdf,.pdf" :disabled="operation.status === 'running'" hidden @change="uploadResume" /></label><button class="outline-button" :disabled="!resumeName || operation.status === 'running'" @click="extractFacts"><Sparkles :size="16" /> Wyciągnij fakty z CV</button></div></div>
+            <p v-if="resumeName && !resumeNameKnown" class="resume-name-hint">To nazwa lokalnej kopii CV. Wgraj plik ponownie, aby pokazać jego oryginalną nazwę.</p>
+            <p v-if="extractedFacts" class="resume-facts-status pending"><CircleAlert :size="16" /> Fakty z aktualnego CV są wyciągnięte. Sprawdź je i kliknij „Zapisz”.</p>
+            <p v-else-if="resumeFactsStatus === 'ready'" class="resume-facts-status ready"><Check :size="16" /> Fakty zostały wyciągnięte i zapisane dla tego CV.</p>
+            <p v-else-if="resumeFactsStatus === 'needs-extraction'" class="resume-facts-status pending"><CircleAlert :size="16" /> Dla tego CV nie zapisano jeszcze wyciągniętych faktów. Wyciągnij je i zapisz.</p>
+            <div class="field facts-field"><label>Fakty z CV</label><textarea v-model="candidateFactsText" rows="11"></textarea><small>Analiza przekazuje tekst CV do wybranego modelu Codex. Sprawdź wynik przed zapisaniem. Jeden fakt w wierszu; po zmianie faktów odśwież oceny.</small></div>
           </section>
           <section class="settings-card danger-zone">
             <div><h2>Guzik zagłady</h2><p>Usuwa wszystkie oferty, oceny, decyzje, aplikacje i ustawienia. Najpierw zostanie utworzona pełna kopia bazy.</p></div>
@@ -539,8 +675,15 @@ onUnmounted(() => {
       </template>
     </main>
 
+    <div v-if="showResumePreview" class="modal-backdrop" @click.self="closeResumePreview">
+      <div class="modal resume-preview-modal" role="dialog" aria-modal="true" aria-labelledby="resume-preview-title">
+        <div class="resume-preview-header"><h2 id="resume-preview-title">{{ resumeName }}</h2><button class="icon-button" aria-label="Zamknij podgląd CV" @click="closeResumePreview"><X :size="18" /></button></div>
+        <div v-if="resumePreviewLoading" class="resume-preview-loading"><LoaderCircle :size="22" class="spin" /> Otwieram CV…</div>
+        <iframe v-else-if="resumePreviewUrl" :src="resumePreviewUrl" title="Podgląd CV" class="resume-preview-frame"></iframe>
+      </div>
+    </div>
     <div v-if="showSync" class="modal-backdrop" @click.self="!syncStarting && (showSync = false, error = '')"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="sync-dialog-title"><h2 id="sync-dialog-title">Pobierz oferty</h2><p>Wybierz serwisy do przeszukania.</p><div class="sync-source-list"><label v-for="source in availableSources" :key="source.id" :class="['sync-source-option', { selected: selectedSyncSourceIds.includes(source.id) }]"><input v-model="selectedSyncSourceIds" type="checkbox" :value="source.id" :disabled="syncStarting" /><span>{{ source.label }}</span></label></div><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="syncStarting" @click="showSync = false; error = ''">Anuluj</button><button class="primary-button" :disabled="syncStarting || !selectedSyncSourceIds.length" @click="startSync">{{ syncStarting ? 'Uruchamiam…' : 'Pobierz z wybranych' }}</button></div></div></div>
-    <div v-if="showImport" class="modal-backdrop" @click.self="showImport = false; error = ''"><div class="modal"><button class="modal-close" @click="showImport = false; error = ''"><X :size="18" /></button><h2>Dodaj ofertę</h2><p>Link z RocketJobs lub JustJoinIT</p><input v-model="importUrl" autofocus placeholder="https://justjoin.it/job-offer/…" @keyup.enter="importOffer" /><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" @click="showImport = false; error = ''">Anuluj</button><button class="primary-button" :disabled="saving || !importUrl.trim()" @click="importOffer">{{ saving ? 'Pobieram…' : 'Dodaj' }}</button></div></div></div>
+    <div v-if="showImport" class="modal-backdrop" @click.self="showImport = false; error = ''"><div class="modal"><button class="modal-close" @click="showImport = false; error = ''"><X :size="18" /></button><h2>Dodaj ofertę</h2><p>Link z RocketJobs, JustJoinIT, Pracuj.pl, No Fluff Jobs, Bulldogjob lub SOLID.Jobs</p><input v-model="importUrl" autofocus placeholder="https://justjoin.it/job-offer/…" @keyup.enter="importOffer" /><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" @click="showImport = false; error = ''">Anuluj</button><button class="primary-button" :disabled="saving || !importUrl.trim()" @click="importOffer">{{ saving ? 'Pobieram…' : 'Dodaj' }}</button></div></div></div>
     <div v-if="pendingBulkDecision" class="modal-backdrop" @click.self="!bulkSaving && (pendingBulkDecision = null, error = '')"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulk-dialog-title"><h2 id="bulk-dialog-title">{{ pendingBulkDecision.decision === 'approved' ? 'Zatwierdzić oferty?' : 'Odrzucić oferty?' }}</h2><p>{{ pendingBulkDecision.count }} {{ offerCountNoun(pendingBulkDecision.count) }} bez wcześniejszej decyzji, z aktualną oceną {{ pendingBulkDecision.decision === 'approved' ? `od ${pendingBulkDecision.threshold}` : `poniżej ${pendingBulkDecision.threshold}` }}/100. Akcja dotyczy wszystkich ofert, niezależnie od wyszukiwania.</p><p v-if="pendingBulkDecision.decision === 'approved'">CV nie zostanie wysłane automatycznie.</p><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="bulkSaving" @click="pendingBulkDecision = null; error = ''">Anuluj</button><button :class="pendingBulkDecision.decision === 'approved' ? 'primary-button' : 'soft-button danger'" :disabled="bulkSaving" @click="confirmBulkDecision">{{ bulkSaving ? 'Zapisuję…' : pendingBulkDecision.decision === 'approved' ? 'Zatwierdź oferty' : 'Odrzuć oferty' }}</button></div></div></div>
     <div v-if="pendingSubmission" class="modal-backdrop" @click.self="!submissionSaving && (pendingSubmission = null, error = '')"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="submission-dialog-title"><h2 id="submission-dialog-title">Oznacz jako wysłane</h2><p>{{ offerForApplication(pendingSubmission)?.title || pendingSubmission.offer_id }}. Zapisz ten status dopiero po potwierdzeniu wysłania przez serwis rekrutacyjny.</p><div class="field"><label for="submission-confirmation">Notatka (opcjonalnie)</label><input id="submission-confirmation" v-model="submissionConfirmation" placeholder="Możesz zostawić puste" @keyup.enter="confirmSubmission" /></div><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="submissionSaving" @click="pendingSubmission = null; error = ''">Anuluj</button><button class="primary-button" :disabled="submissionSaving" @click="confirmSubmission">{{ submissionSaving ? 'Zapisuję…' : 'Oznacz wysłane' }}</button></div></div></div>
     <div v-if="showDatabaseReset" class="modal-backdrop" @click.self="!databaseResetSaving && (showDatabaseReset = false, error = '')"><div class="modal danger-modal" role="dialog" aria-modal="true" aria-labelledby="reset-dialog-title"><h2 id="reset-dialog-title">Wyczyścić całą bazę?</h2><p>Wszystkie oferty, oceny, decyzje, aplikacje i ustawienia zostaną usunięte. Przed resetem aplikacja zapisze kopię bezpieczeństwa.</p><div class="field"><label for="database-reset-confirmation">Aby potwierdzić, wpisz: <strong>USUŃ WSZYSTKO</strong></label><input id="database-reset-confirmation" v-model="databaseResetConfirmation" autofocus autocomplete="off" @keyup.enter="resetDatabase" /></div><p v-if="error" class="modal-error">{{ error }}</p><div class="modal-actions"><button class="outline-button" :disabled="databaseResetSaving" @click="showDatabaseReset = false; error = ''">Anuluj</button><button class="soft-button danger" :disabled="databaseResetSaving || databaseResetConfirmation !== 'USUŃ WSZYSTKO'" @click="resetDatabase">{{ databaseResetSaving ? 'Tworzę kopię i czyszczę…' : 'Tak, wyczyść wszystko' }}</button></div></div></div>
