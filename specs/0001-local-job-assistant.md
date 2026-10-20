@@ -24,6 +24,8 @@ Powłoka pywebview wyświetla interfejs Vue w natywnym oknie macOS i bezpośredn
 
 Główne widoki: `Oferty` (bez oceny), `Do sprawdzenia` (ocenione bez decyzji), `Zatwierdzone do wysłania`, `Odrzucone`, `Historia aplikacji` i `Ustawienia wyszukiwania`. Oryginalne ogłoszenie oraz formularz rekrutacyjny otwierają się w przeglądarce używanej przez Codex. Okno aplikacji pozostaje miejscem przeglądu ocen i zatwierdzania ofert.
 
+Na górze szczegółów oferty etykieta `Język opisu` pokazuje automatycznie rozpoznany język oryginalnego opisu: polski, angielski, polski i angielski albo nieustalony. Rozpoznanie korzysta lokalnie z treści opisu, działa także dla zapisanych wcześniej ofert i pomaga wybrać język CV.
+
 Przyciski zatwierdzenia i odrzucenia są na górze szczegółów oferty. Ocena AI działa w tle: podczas niej można przeglądać aplikację, a ukończone wyniki pojawiają się w interfejsie na bieżąco. Decyzja zbiorcza nie wysyła CV i nie uruchamia automatycznie Codex.
 
 Przycisk `Pobierz oferty` otwiera okno z listą aktualnie zarejestrowanych konektorów. Właściciel wybiera co najmniej jeden serwis; synchronizacja uruchamia tylko wybrane konektory. Lista w oknie pochodzi z serwera, aby nowa integracja mogła do niej dołączyć bez zmiany formularza.

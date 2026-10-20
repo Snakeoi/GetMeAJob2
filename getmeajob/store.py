@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .config import DEFAULT_CANDIDATE_PROFILE, DEFAULT_DECISION_PROFILE, DEFAULT_SEARCH_PROFILE
+from .description_language import description_language
 
 
 def utc_now() -> str:
@@ -226,6 +227,7 @@ class Store:
 
     def _offer(self, row: sqlite3.Row, evaluation: sqlite3.Row | None = None) -> dict[str, Any]:
         result = dict(row)
+        result["description_language"] = description_language(result["description"])
         result["contract_types"] = json.loads(result.pop("contract_types_json"))
         result["salary"] = json.loads(result.pop("salary_json"))
         result.pop("raw_json")
