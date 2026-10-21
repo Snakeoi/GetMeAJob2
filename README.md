@@ -40,7 +40,7 @@ cd frontend && npm run build
 
 Aplikacja preferuje Codex CLI dołączony do ChatGPT lub Codex w `/Applications`, a następnie polecenie `codex` z PATH. Własną ścieżkę można ustawić przez `GETMEAJOB_CODEX_EXECUTABLE`.
 
-Model oceny można zmienić przez `GETMEAJOB_CODEX_MODEL`; bez tej zmiennej model wybiera Codex CLI według swojego domyślnego ustawienia (bez wczytywania konfiguracji użytkownika). Integracja z LM Studio/Bionic, automatyczne uruchamianie sesji aplikacyjnej z okna, harmonogram synchronizacji, wykrywanie wygasłych ofert i pakiet `.app` są kolejnymi przyrostami. JustJoinIT ogranicza jedną synchronizację do 300 najświeższych kandydatów według nazw ról, a Pracuj.pl domyślnie do 80 kandydatów z dwóch stron wyników, aby nie obciążać serwisów.
+Model oceny można zmienić przez `GETMEAJOB_CODEX_MODEL`; bez tej zmiennej model wybiera Codex CLI według swojego domyślnego ustawienia (bez wczytywania konfiguracji użytkownika). Integracja z LM Studio/Bionic, automatyczne uruchamianie sesji aplikacyjnej z okna, harmonogram synchronizacji, wykrywanie wygasłych ofert i pakiet `.app` są kolejnymi przyrostami. JustJoinIT po jednym kliknięciu pobiera wszystkie pasujące oferty w kolejnych partiach do 300, z opóźnieniem między żądaniami. Trwale zapisany postęp pozwala wznowić pobieranie po przerwaniu. Pracuj.pl pobiera domyślnie do 80 kandydatów z dwóch stron wyników, aby nie obciążać serwisów.
 
 ### No Fluff Jobs
 

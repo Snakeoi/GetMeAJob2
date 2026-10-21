@@ -116,6 +116,8 @@ class JustJoinSource:
             headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xml;q=0.9,*/*;q=0.8"},
         )
         self.delay_seconds = delay_seconds
+        if max_candidates < 1:
+            raise ValueError("max_candidates must be positive")
         self.max_candidates = max_candidates
 
     def _get(self, url: str) -> str:
@@ -129,9 +131,13 @@ class JustJoinSource:
         robots = RobotFileParser()
         robots.parse(self._get(ROBOTS_URL).splitlines())
         pending = [SITEMAP_URL]
-        found: list[tuple[str, str | None]] = []
+        found: dict[str, str | None] = {}
+        visited: set[str] = set()
         while pending:
             sitemap_url = pending.pop(0)
+            if sitemap_url in visited:
+                continue
+            visited.add(sitemap_url)
             kind, entries = _xml_locations(self._get(sitemap_url))
             if kind == "sitemapindex":
                 pending.extend(url for url, _ in entries)
@@ -146,19 +152,50 @@ class JustJoinSource:
                 if not (slug_matches_roles(slug, profile["roles"]) if profile else PYTHON_ROLE.search(slug) or FULLSTACK_ROLE.search(slug)):
                     continue
                 if robots.can_fetch(USER_AGENT, url):
-                    found.append((url, lastmod))
-        found.sort(key=lambda item: item[1] or "", reverse=True)
-        return found[: self.max_candidates]
+                    found[url] = max(found.get(url) or "", lastmod or "") or None
+        return sorted(found.items(), key=lambda item: (item[1] or "", item[0]), reverse=True)
 
-    def offers(self, progress: Callable[[int, int], None] | None = None, profile: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
-        urls = self.discover(profile)
-        for index, (url, lastmod) in enumerate(urls, 1):
-            try:
-                yield parse_job_page(url, self._get(url), lastmod)
-            except (httpx.HTTPError, ValueError):
-                continue
-            finally:
+    def offers(
+        self, progress: Callable[[int, int], None] | None = None,
+        profile: dict[str, Any] | None = None,
+        diagnostics: dict[str, Any] | None = None,
+        checkpoint: dict[str, Any] | None = None,
+        save_checkpoint: Callable[[dict[str, Any]], None] | None = None,
+    ) -> Iterator[dict[str, Any]]:
+        diagnostics = diagnostics if diagnostics is not None else {}
+        # URLs, rather than offsets, remain stable when sitemap order changes.
+        profile_key = json.dumps(profile, sort_keys=True, ensure_ascii=False)
+        checkpoint = checkpoint or {}
+        completed = set(checkpoint.get("completed", [])) if checkpoint.get("profile") == profile_key else set()
+        discovered = self.discover(profile)
+        completed.intersection_update(url for url, _ in discovered)
+        pending = [(url, lastmod) for url, lastmod in discovered if url not in completed]
+        if not pending:
+            completed.clear()
+            pending = discovered
+        diagnostics.update(
+            total_candidates=len(discovered), candidates=len(pending),
+            max_candidates=self.max_candidates, checked=0, detail_errors=0,
+            cycle_checked=len(completed), remaining=len(pending),
+        )
+        for offset in range(0, len(pending), self.max_candidates):
+            batch = pending[offset:offset + self.max_candidates]
+            for index, (url, lastmod) in enumerate(batch, offset + 1):
+                try:
+                    offer = parse_job_page(url, self._get(url), lastmod)
+                except (httpx.HTTPError, ValueError):
+                    diagnostics["detail_errors"] += 1
+                else:
+                    # Checkpoint only after the consumer has stored/filtered the offer.
+                    yield offer
+                # Failed details count as attempted and are retried in the next cycle,
+                # so a broken listing cannot block the rest of the queue.
+                completed.add(url)
+                if save_checkpoint:
+                    save_checkpoint({"profile": profile_key, "completed": sorted(completed)})
+                diagnostics.update(checked=index, cycle_checked=len(completed),
+                                   remaining=len(discovered) - len(completed))
                 if progress:
-                    progress(index, len(urls))
+                    progress(index, len(pending))
                 if self.delay_seconds:
                     time.sleep(self.delay_seconds)

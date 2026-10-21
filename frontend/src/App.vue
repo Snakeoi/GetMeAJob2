@@ -589,6 +589,11 @@ onUnmounted(() => {
           <div v-for="source in lastSyncReport.sources" :key="source.id" class="sync-report-source">
             <strong>{{ source.label }}</strong>
             <span>{{ source.seen }} pobranych szczegółów · {{ source.matched }} pasujących · {{ source.new }} nowych · {{ source.skipped }} odrzuconych</span>
+            <template v-if="source.id === 'justjoin' && source.discovery?.total_candidates != null">
+              <small>Znaleziono {{ source.discovery.total_candidates }} pasujących linków · sprawdzono w tej synchronizacji {{ source.discovery.checked }} / {{ source.discovery.candidates }} · błędy szczegółów: {{ source.discovery.detail_errors }}</small>
+              <small>W bieżącym cyklu sprawdzono {{ source.discovery.cycle_checked }} · pozostało {{ source.discovery.remaining }} · wielkość partii: {{ source.discovery.max_candidates }}</small>
+              <small>{{ source.discovery.remaining ? 'Nie ukończono pobierania. Kolejna synchronizacja wznowi pozostałe oferty.' : 'Cykl zakończony. Kolejna synchronizacja rozpocznie ponowne sprawdzanie ofert.' }}</small>
+            </template>
             <template v-if="source.id === 'nofluffjobs' && source.discovery?.pages_fetched != null">
               <small>{{ source.discovery.pages_fetched }} stron wyników · {{ source.discovery.listing_entries }} pozycji · {{ source.discovery.candidates }} kandydatów · {{ source.discovery.detail_errors }} błędów szczegółów</small>
               <small>Limit na stanowisko: {{ source.discovery.max_pages_per_term }} strony / {{ source.discovery.max_candidates_per_term }} kandydatów</small>

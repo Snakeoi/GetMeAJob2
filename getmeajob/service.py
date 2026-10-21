@@ -143,8 +143,11 @@ class JobService:
                 if isinstance(source, (RocketJobsSource, JustJoinSource, PracujSource, NoFluffJobsSource,
                                        BulldogjobSource, SolidJobsSource)):
                     kwargs["profile"] = profile
-                if isinstance(source, (PracujSource, NoFluffJobsSource, BulldogjobSource, SolidJobsSource)):
+                if isinstance(source, (JustJoinSource, PracujSource, NoFluffJobsSource, BulldogjobSource, SolidJobsSource)):
                     kwargs["diagnostics"] = source_counts["discovery"]
+                if isinstance(source, JustJoinSource):
+                    kwargs["checkpoint"] = self.store.get_setting("justjoin_sync_checkpoint")
+                    kwargs["save_checkpoint"] = lambda state: self.store.set_setting("justjoin_sync_checkpoint", state)
                 for offer in source.offers(**kwargs):
                     counts["seen"] += 1
                     source_counts["seen"] += 1
